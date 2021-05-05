@@ -1,0 +1,2260 @@
+---
+title: "Chapter One - microbial community drivers: depth and environmental factors"
+author: "Ricardo Silva"
+ dataset3/11/2020"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup}
+knitr::opts_chunk$set(
+	fig.height = 5,
+	fig.width = 8,
+	dpi = 180,
+	message = FALSE,
+	warning = FALSE,
+	cache = TRUE,
+	echo = TRUE
+)
+```
+
+```{r packages}
+# set the working directory
+setwd("C:/Users/rrocha/Documents/R/phd/2016/data/")
+
+# main packs to start with
+# BiocManager::install("ade4") # -> to get packages from bioconductor website
+library(phyloseq)
+library(microbiome)
+#require(ALDEx2) # used for per OTU comparisons
+#library(CoDaSeq)
+#library(propr) # used for correlation calculation
+library(QsRutils)
+library(vegan) 
+#library(zCompositions)
+#library(ggpubr)
+library(viridis) # used to get colours
+library(RColorBrewer) # used to get colour
+library(factoextra)
+library(FactoMineR)
+#library(devtools)
+library(pairwiseAdonis)
+library(patchwork)
+library(tidyverse)
+library(tidymodels)
+library(tidytext)
+# load my functions
+source('~/R/phd/2016/script/1st_chpt/my_functions.R')
+source('~/R/phd/2016/script/1st_chpt/theme_publication.R')
+```
+
+# Data preparation and preprocessing
+
+```{r data}
+# Data preparation 
+# abundance table 
+# southern region without outliers
+abund.df <- read.csv("C:/Users/rrocha/Documents/R/phd/2016/data/SPE_bac_MH16.csv",  row.names = 1, head = TRUE)
+
+# taxonomy table
+TAXdf <- read.csv("C:/Users/rrocha/Documents/R/phd/2016/data/tax_bac_2016.csv", row.names = 1, head = TRUE)
+TAXdf <- TAXdf 
+str(TAXdf)
+sum(is.na(TAXdf))
+apply(TAXdf, 2, function(x) any(is.na(x)))
+bac.seqs <- TAXdf %>% rownames_to_column("otu") %>% select(otu, seq)
+TAXdf <- TAXdf  %>% 
+  rownames_to_column('id') %>%
+  mutate(across(everything(), ~replace_na(.x, "unknown"))) %>% 
+  filter(Phylum != 'unknown') %>%
+  mutate(across(where(is.character), as.factor)) %>%
+  select(-seq) %>%
+  column_to_rownames('id')
+
+# make sure that the same OTUs are the same in both datasets
+abund.df <- base::subset(abund.df, row.names(abund.df) %in% row.names(TAXdf))
+
+## meta data
+MH_env <- read.csv("C:/Users/rrocha/Documents/R/phd/2016/data/MH16_env.csv", row.names = 1)
+# str(MH_env)
+MH_env$Depth <- as.factor(MH_env$Depth) # Depth as factor = treatment
+```
+
+# Exploratory Data Analysis (EDA)
+
+```{r EDA preprocessing}
+# Filtering 
+min.prop=0.001 # minimum proportion in any sample (default)
+min.occurrence=0.001 # minimum occurrence across all samples (sparsity filter)
+# Filtering
+# it is important to remove 0 count OTUs
+# data are samples by column, and OTUs by row.
+d.filt0 <- CoDaSeq::codaSeq.filter(abund.df, min.prop=0, min.occurrence=0, samples.by.row=FALSE)
+# keep only OTUs that are >0.001 proportion in any sample and a minimum of 0.1% occurance across all sample
+min.prop=0.001 # minimum proportion in any sample (default)
+min.occurrence=0.001 # minimum occurrence across all samples (sparsity filter)
+# output is samples by column.
+d.filt <- CoDaSeq::codaSeq.filter(d.filt0, min.prop=min.prop, max.prop=1, min.occurrence=min.occurrence, samples.by.row=FALSE)
+
+# Dealing with zeros
+# this function expects the samples to be in ROWS and OTUs to be in columns
+# so the dataset is turned sideways on input, and then back again on output
+# you need to know which orientation your data needs to be in for each tool
+# The output will have samples as COLUMNS
+d.zero.hand <- t(zCompositions::cmultRepl(t(d.filt), label =0, method="CZM")) # filtered
+
+# clr-transformation
+# make our compositional dataset
+# sample as COLUMNS
+# d.clr.abund <- t(apply(d.pro.abund, 2, function(x){log(x) - mean(log(x))}))
+# or
+d.clr.abund.filt <- CoDaSeq::codaSeq.clr(d.zero.hand, samples.by.row = FALSE)
+
+# filter taxa table to ensure the OTUs
+TAX.filt <- base::subset(TAXdf, row.names(TAXdf) %in% row.names(d.filt))
+```
+
+```{r phyloseq objects}
+# phyloseq object with filtered and clr-transformed
+pseq.filt.clr <- phyloseq(otu_table(as.matrix(d.clr.abund.filt), taxa_are_rows = TRUE), 
+                          tax_table(as.matrix(TAX.filt)),sample_data(MH_env))
+# phyloseq object and relative abundance (data were filtered)
+pseq.filt <- phyloseq(otu_table(as.matrix(as.data.frame(d.filt)), taxa_are_rows = TRUE), 
+                      tax_table(as.matrix(TAX.filt)), sample_data(MH_env))
+# Relative abundances
+pseq.filt.rel <- microbiome::transform(pseq.filt, "compositional")
+```
+
+## PCA and Kmean
+
+```{r}
+# prepare the data for PCA
+pca.abund <- t(d.clr.abund.filt) %>% as.data.frame() %>% rownames_to_column("Sample_ID") %>% 
+  left_join(MH_env %>% rownames_to_column("Sample_ID") %>% select(Sample_ID, Depth)) 
+cols_depth <- c("3" = "firebrick1", "8" = "forestgreen", "20" = "darkcyan", "30" = "darkblue")
+
+# Write recipe for PCA
+pca_rec <- recipe(~., data = pca.abund) %>% # ~. because it is unsupervised
+# Specify character_code as key/id column
+  update_role(Sample_ID, Depth, new_role = 'id') %>% 
+# normalize the data (center and scale all predictors (mean to zero and standard deviation of one)
+  step_normalize(all_predictors()) %>%
+# PCA is done here
+# can use threshold to specify if we want to capture 90% of variance in the data (threshold = 0.9)
+  step_pca(all_predictors(),  id = "pca") # for the bar plot showing how much variance each component accounts for
+
+# 2 prep the recipe - values computed (prep() implements the recipe)
+pca_prep <- prep(pca_rec)
+
+# variance bar plot (variance explained)
+total_variance_plot <- pca_prep %>%
+  tidy(id = 'pca', type = 'variance') %>%
+  dplyr::filter(terms == 'percent variance') %>%
+  ggplot(aes(x = component, y = value)) +
+  geom_col(fill = "lightblue") +
+  # xlim(c(0,5))+
+  labs(y = '% of total variance')
+
+# for visualization = juice
+pca.plot <- juice(pca_prep) %>% # juice() to return the results of a recipe
+  ggplot(aes(PC1,PC2)) +
+  geom_point(aes(color = Depth), alpha = 0.7, size =5) + 
+  #geom_text(check_overlap = TRUE, hjust = 'inward', family = 'IBM Plex Sans') +
+  geom_hline(yintercept=0, linetype="dashed", alpha = 0.3) +
+  geom_vline(xintercept=0, linetype="dashed", alpha = 0.3) +
+  # scale_colour_viridis_d(option = "plasma") 
+  scale_color_manual(values = cols_depth) + 
+        theme_Publication_3()
+
+# get % variation to add in the legend axis
+var_explained <- pca_prep %>%
+  tidy(id = 'pca', type = 'variance') %>%
+  dplyr::filter(terms == 'percent variance') %>%
+  pull(value)
+pca.plot$labels$x <- paste0(pca.plot$labels$x," ", round(var_explained[1],2),"%")
+pca.plot$labels$y <- paste0(pca.plot$labels$y," ", round(var_explained[2],2),"%")
+
+# get PCA socres 
+scores.pca <- juice(pca_prep) %>% select(-Depth) %>% column_to_rownames(var = 'Sample_ID')
+
+# k-means clustering [assume 3 clusters]
+km <- kmeans(scores.pca, centers= 6, nstart=5)
+
+# add ellipses to PCA plot
+k.bac <- factor(km$cluster)
+pca.bac <- pca.plot +  
+  stat_ellipse(aes(x=PC1,y=PC2,group=k.bac),
+               level=0.95, alpha=1, type = "norm", linetype = 2) +
+        ggtitle("PCA: Bacterial Community") 
+
+pca.bac + annotate("text", x= -1.5, y = 78, label = 'bold("King River")', size = 4.5, parse = TRUE) +
+  annotate("text", x= -16.5, y = 25, label = 'bold("Gordon River")', size = 4.5, parse = TRUE) +
+  annotate("text", x= 5.5, y = 5, label = 'bold("ocean")', size = 4.5, parse = TRUE) +
+  annotate("text", x= -14, y = 0, label = 'bold("3 m")', size = 4.5, parse = TRUE) +
+  annotate("text", x= 0, y = -5, label = 'bold("8 m")', size = 4.5, parse = TRUE) +
+  annotate("text", x= 30, y = 17.5, label = 'atop(bold("20 m and"), bold("2 m from the bottom"))', size = 4.5, parse = TRUE)
+```
+
+# EDA - Bacterial Community Composition
+
+```{r EDA hcluster}
+# hierarchical clustering
+# Aitchison distance = Euclidean distance of clr-transformed compositions
+# generate the distance matrix
+dd <- dist(t(d.clr.abund.filt), method="euclidian")
+# cluster the data
+hc <- hclust(dd, method="ward.D2")
+str(hc)
+# Cluster plot
+clust <- plot(hc, cex=0.6)
+# generate colors
+library(scales)
+n1 <- 5                                        # Amount of default colors
+hex_codes1 <- hue_pal()(n1)                             # Identify hex codes
+#show_col(hex_codes1)
+
+clust1 <- factoextra::fviz_dend(hc, cex = 0.6, k= 6, palette = c("darkblue","#A3A500","darkgreen","#00B0F6","#dd00f6","darkred"), 
+                    rect = TRUE, rect_border = c("darkblue","#A3A500","darkgreen","#00B0F6","#dd00f6","darkred"), rect_fill = TRUE, 
+                    main = "Dendrogram - ward.D2",
+                    xlab = "Samples", ylab = "Distance", sub = "")
+# type = "circular"
+
+# now re-order the data to plot the barplot in the same order
+d.order <- hc$labels[hc$order]
+samples.order <- colnames(d.clr.abund.filt[, d.order]) # to be used in the bar plots
+```
+
+### EDA - Barplot
+
+```{r EDA bar plot - Phylum}
+# melt phyloseq object 
+pseq.filt <- phyloseq(otu_table(as.matrix(as.data.frame(d.filt)), taxa_are_rows = TRUE), 
+                      tax_table(as.matrix(TAX.filt)), sample_data(MH_env))
+
+pseq_phylum <- pseq.filt.rel %>%
+  tax_glom(taxrank = "Phylum") %>%                     # agglomerate at phylum level
+  #subset_taxa(Phylum == phylum.subset) %>%
+  psmelt.dplyr() %>%                                         # Melt to long format
+  arrange(Phylum)                                      # Sort data frame alphabetically by phylum
+
+# Creating the "Phylum" <1% Abundance
+# class(pseq_phylum$Phylum)
+pseq_phylum$Phylum <- as.character(pseq_phylum$Phylum) #convert to character
+# class(pseq_phylum$Phylum)
+
+#simple way to rename phyla with < 1% abundance
+pseq_phylum$Phylum[pseq_phylum$Abundance < 0.005] <- " < 0.5% abund."
+# Reorder following the value of another column:
+# reording Phylum by Abundance - lock in Phylum level
+pseq_phylum <- pseq_phylum %>% 
+  mutate(Phylum = reorder(Phylum, Abundance))
+unique(pseq_phylum$Phylum)
+
+# ste colors for plotting
+library(RColorBrewer)
+colourCount <- length(unique(pseq_phylum$Phylum))
+getPalette <- colorRampPalette(brewer.pal(10, "Paired"))
+
+phylum_colors <- c("#AD6F3B", "indianred3","#673770", "#8569D5", "#5E738F","coral4",
+                   "lightskyblue4", "firebrick4", "rosybrown1",
+  "#CBD588", "orange","#DA5724", "#508578","#652926", "#C84248", "#D1A33D", "#8A7C64", "#599861","#5F7FC7","#CD9BCD")
+scales::show_col(phylum_colors)
+color = grDevices::colors()[grep('gr(a|e)y', grDevices::colors(), invert = T)]
+
+# Plotting
+bar1 <- pseq_phylum %>%
+  ggplot(aes(x = Sample, y = Abundance, fill = reorder(Phylum, Abundance))) + 
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = getPalette(colourCount)) +
+ # scale_x_discrete(limits=c(samples.order)) +
+  # Change the labels and Remove x axis title
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(fill = "Phylum") +
+  #
+  guides(keywidth = 1, keyheight = 1) + 
+  ylab("Relative Abundance (Phyla > 0.5%)")
+
+bar1 + facet_grid(~Depth, switch = "x", scales = "free_x", space = "free_x") +
+    theme(panel.spacing = unit(0, "lines"), 
+           strip.background = element_blank(),
+           strip.placement = "outside") +
+  xlab("Depth (m)")
+```
+
+```{r bar plot - Class}
+# Class bar plot
+pseq_class <- pseq.filt.rel %>%
+  tax_glom(taxrank = "Class") %>%                     # agglomerate at phylum level
+  psmelt.dplyr() %>%                                         # Melt to long format
+  arrange(Class)                                      # Sort data frame alphabetically by phylum
+
+# Creating the "Class" <1% Abundance
+# class(pseq_class$Class)
+pseq_class$Class <- as.character(pseq_class$Class) #convert to character
+# class(pseq_class$Class)
+
+#simple way to rename phyla with < 1% abundance
+pseq_class$Class[pseq_class$Abundance < 0.01] <- " < 1% abund."
+# Reorder following the value of another column:
+# reording Phylum by Abundance - lock in Phylum level
+pseq_class <- pseq_class %>% 
+  mutate(Class = reorder(Class, Abundance))
+unique(pseq_class$Class)
+
+# set color
+library(RColorBrewer)
+colourCount <- length(unique(pseq_class$Class))
+getPalette <- colorRampPalette(brewer.pal(12, "Paired"))
+
+# Plotting
+bar2 <- ggplot(pseq_class, aes(x = Sample, y = Abundance, fill = reorder(Class, Abundance))) + 
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = getPalette(colourCount)) +
+ # scale_x_discrete(limits=c(samples.order)) +
+  # Change the labels and Remove x axis title
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(fill = "Class") +
+  #
+  guides(keywidth = 1, keyheight = 1) + 
+  ylab("Relative Abundance (Class > 1%)")
+
+bar2 <- bar2 + facet_grid(~Depth, switch = "x", scales = "free_x", space = "free_x") +
+    theme(panel.spacing = unit(0, "lines"), 
+           strip.background = element_blank(),
+           strip.placement = "outside") +
+  xlab("Depth (m)")
+bar2
+```
+
+```{r table rel abund}
+# function to get abundance table
+abund.table <- function(ab.table, TAXdf, taxo) {
+  cols <- c(taxo, 'Sample') 
+ df <-  ab.table %>% rownames_to_column('otu') %>% 
+    pivot_longer(!otu, names_to = "Sample", values_to = "Abundance") %>%
+    left_join(TAXdf %>% rownames_to_column('otu')) %>%
+    group_by_at(vars(all_of(cols))) %>%
+    summarise(Abundance = sum(Abundance)) %>%
+    pivot_wider(names_from = 'Sample', values_from = 'Abundance') %>%
+    column_to_rownames(taxo)
+ return(df)
+}
+
+#phylum
+stats.phylum <- abund.table(d.filt, TAXdf, "Phylum") %>%
+  rownames_to_column('Taxa') %>%
+  rowwise() %>%
+  mutate(n = sum(c_across(cols = names(d.filt))),
+         mean = mean(c_across(cols = names(d.filt))),
+         stdev = sd(c_across(cols = names(d.filt)))) %>%
+  mutate(freq = round(100*(n/sum(.$n)),2)) %>%
+  column_to_rownames('Taxa') %>%
+  select(n,mean,stdev,freq) %>%
+  arrange(desc(freq))
+
+head(stats.phylum)
+
+# Class
+stats.class <- abund.table(d.filt, TAXdf, "Class") %>%
+  rownames_to_column('Taxa') %>%
+  rowwise() %>%
+  mutate(n = sum(c_across(cols = names(d.filt))),
+         mean = mean(c_across(cols = names(d.filt))),
+         stdev = sd(c_across(cols = names(d.filt)))) %>%
+  mutate(freq = round(100*(n/sum(.$n)),2)) %>%
+  column_to_rownames('Taxa') %>%
+  select(n,mean,stdev,freq) %>%
+  arrange(desc(freq))
+
+head(stats.class)
+
+# Family
+stats.family <- abund.table(d.filt, TAXdf, "Family") %>%
+  rownames_to_column('Taxa') %>%
+  rowwise() %>%
+  mutate(n = sum(c_across(cols = names(d.filt))),
+         mean = mean(c_across(cols = names(d.filt))),
+         stdev = sd(c_across(cols = names(d.filt)))) %>%
+  mutate(freq = round(100*(n/sum(.$n)),2)) %>%
+  column_to_rownames('Taxa') %>%
+  select(n,mean,stdev,freq) %>%
+  arrange(desc(freq))
+
+head(stats.family)
+
+# keep the environemnt tidy
+rm(list=setdiff(ls(), c('seed',"MH_env","abund.df","TAXdf",'pseq.all', 'pseq.list', 'TAXdf', 'TAX.table','cols_site_layer', 'cols_layer',"d.mh.south")))
+# load my functions
+source('~/R/phd/2016/script/1st_chpt/my_functions.R')
+source('~/R/phd/2016/script/1st_chpt/theme_publication.R')
+```
+
+# Vertical Distribution - depth profile
+
+```{r data prep}
+# Data preparation 
+# abundance table 
+# southern region without outliers
+outliers <- c("ocean_3", "KR_3", "GR_3", "GR_8") # aka non-MacH samples
+# southern transect without outliers
+d.mh.south <- abund.df %>% dplyr::select(starts_with("S") & -all_of(outliers))
+
+# taxonomy table
+TAXdf <- read.csv("C:/Users/rrocha/Documents/R/phd/2016/data/tax_bac_2016.csv", row.names = 1, head = TRUE)
+TAXdf <- TAXdf %>% select(-seq)
+str(TAXdf)
+sum(is.na(TAXdf))
+apply(TAXdf, 2, function(x) any(is.na(x)))
+TAXdf <- TAXdf  %>% 
+  rownames_to_column('id') %>%
+  mutate(across(everything(), ~replace_na(.x, "unknown"))) %>%  # replace NAs as unknown
+  filter(Phylum != 'unknown') %>%                               # remove unknown Phyla
+  mutate(across(where(is.character), as.factor)) %>%
+  column_to_rownames('id')
+TAX.mh.south <- base::subset(TAXdf, row.names(TAXdf) %in% row.names(d.mh.south))
+
+# meta data
+MH_env.depth.south <- base::subset(MH_env, row.names(MH_env) %in% names(d.mh.south))
+MH_env.depth.south <-MH_env.depth.south %>%
+  mutate(Depth =  dplyr::recode(Depth, '30' = "2mBottom")) %>%
+  mutate_if(is.character,as.factor) %>%
+  "row.names<-"(.$sample_id) 
+
+# Phyloseq Object
+pseq.mh.south <- phyloseq(otu_table(as.matrix(as.data.frame(d.mh.south)), taxa_are_rows = TRUE), 
+                          tax_table(as.matrix(TAX.mh.south)), sample_data(MH_env.depth.south))
+# Filter out any OTUs that are non bacterial
+pseq.mh.south <- pseq.mh.south %>%
+  subset_taxa(
+    Kingdom == "Bacteria" &
+      Family  != "mitochondria" &
+      Class   != "Chloroplast"
+  )
+
+d.mh.south <- data.frame(otu_table(pseq.mh.south))
+table(tax_table(pseq.mh.south)[,"Phylum"])
+# table(tax_table(pseq.mh.south)[,"Genus"])
+
+```
+
+
+```{r data filt transf}
+# filtering data and clr-transformation
+min.prop=0.001 # minimum proportion in any sample (default)
+min.occurrence=0.001 # minimum occurrence across all samples (sparsity filter)
+# prepare databases
+d.filt0.mh.south <- CoDaSeq::codaSeq.filter(d.mh.south, min.prop=0, min.occurrence=0, samples.by.row=FALSE)
+d.filt.mh.south <- CoDaSeq::codaSeq.filter(d.filt0.mh.south, min.prop=min.prop, max.prop=1, min.occurrence=min.occurrence, samples.by.row=FALSE)
+d.zero.hand.mh.south <- t(zCompositions::cmultRepl(t(d.filt.mh.south), label =0, method="CZM")) # filtered
+d.clr.abund.filt.mh.south <- CoDaSeq::codaSeq.clr(d.zero.hand.mh.south, samples.by.row = FALSE) # samples as COLUMN
+TAX.filt.mh.south <- base::subset(TAXdf, row.names(TAXdf) %in% row.names(d.filt.mh.south))
+
+# phyloseq objects
+# filtered
+pseq.filt.south <- phyloseq(otu_table(as.matrix(as.data.frame(d.filt.mh.south)), taxa_are_rows = TRUE), 
+                      tax_table(as.matrix(TAX.filt.mh.south)), sample_data(MH_env.depth.south))
+# relative abund
+pseq.filt.rel.south <- microbiome::transform(pseq.filt.south, "compositional")
+# clr transformed
+pseq.filt.mh.clr <- phyloseq(otu_table(as.matrix(d.clr.abund.filt.mh.south), taxa_are_rows = TRUE), 
+                          tax_table(as.matrix(TAX.filt.mh.south)),sample_data(MH_env.depth.south))
+```
+
+## Environmental variables and Alpha diversity indices 
+
+```{r env factors}
+# Alpha Diversity -> alpha_div.R
+
+combDF.south <- MH_env.depth.south %>% drop_na() %>%
+  dplyr::select("Depth", "DO","Salinity","Temperature", "Carbon", "Nitrogen", "CN", "TSSmean", "AOB_copies", "AOA_copies", "nosZ_copies", "Chao1","Shannon")
+data_long <- combDF.south %>% gather(key="env_par", value="value", -Depth)
+meta_mh_summary <- data_long%>% group_by(Depth, env_par)%>%
+  summarise(mean= mean(value), sd= sd(value), max = max(value),min = min(value))
+# last format on excel
+write.csv(meta_mh_summary, "C:/Users/rrocha/Documents/R/phd/2016/output/data/meta_mh_south_summary.csv")
+
+# sorting axis for plot
+data_long$env_par <- factor(data_long$env_par, levels=c("DO","Salinity","Temperature", "Carbon", "Nitrogen", "CN", "TSSmean", "AOB_copies", "AOA_copies", "nosZ_copies", "Chao1","Shannon"))
+
+# plot
+p.meta.depth <- data_long %>% 
+  ggplot(aes(x=Depth, y=value)) +
+  geom_boxplot(aes(color = Depth), outlier.color = NA) +
+  coord_flip() +
+  scale_x_discrete(limits = rev(levels(data_long$Depth)))+
+  geom_jitter(aes(color = Depth), alpha=0.6) +
+  facet_wrap(~ env_par, scales = "free") +
+  labs(y = "")
+
+# function for publication in theme_publication.R
+
+p.meta.depth + scale_colour_Publication()+ theme_Publication() + 
+  labs(title="Environmental Parameters - Depth Profle")+theme(legend.position = "none")
+
+
+# Using MicrobiomeSeq code
+env.depth.anova1 <- plot_anova_env(pseq.mh.south, grouping_column = "Depth", pValueCutoff = 0.001, 
+                                  select.variables = c("DO","Salinity","Temperature", "Nitrogen", "Carbon", "TSSmean"))
+env.depth.anova1 +  theme_Publication() + 
+  labs(title="Environmental Parameters - Depth Profle") + theme(legend.position = "none") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+xlab("Depth (m)")
+
+env.depth.anova2 <- plot_anova_env(pseq.mh.south, grouping_column = "Depth", pValueCutoff = 0.001, 
+                                  select.variables = c("AOB_copies","AOA_copies","nosZ_copies" , "Chao1", "Shannon"))
+env.depth.anova2 +  theme_Publication() + 
+  labs(title="Nitrogen-related genes and\nDiversity Indices - Depth Profile") + theme(legend.position = "none") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+xlab("Depth (m)")
+
+# if it's not working use the code below (probably there is no significance) -> use print.lines = FALSE
+env.depth.anova2 <- plot_anova_env(pseq.mh.south, grouping_column = "Depth", pValueCutoff = 0.001,
+                                      select.variables = c("AOB_copies","AOA_copies","nosZ_copies" , "Chao1", "Shannon"), print.lines = FALSE)
+env.depth.anova2 +  theme_Publication() + 
+  labs(title="Nitrogen-related genes and\nDiversity Indices - Depth Profile") + theme(legend.position = "none") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+xlab("Depth") 
+
+
+# STATS  
+# making summary tables (ANOVA and Tukey)
+stats.sum.depth <- data_long %>% 
+  nest(data = c(Depth, value)) %>% 
+  mutate(model = map(data, ~anova(lm(value ~ Depth, .))), 
+         tidy = map(model, broom::tidy)) %>% 
+  select(env_par, tidy) %>% 
+  unnest(tidy)
+# write.csv(stats.sum.depth, "C:/Users/rrocha/Documents/R/phd/2016/output/data/anova_env_summary_depth.csv")
+
+stats.sum.depth.Tukey <- data_long %>% 
+  nest(data = c(Depth, value)) %>% 
+  mutate(model = map(data, ~TukeyHSD(aov(lm(value ~ Depth, .)))), 
+         tidy = map(model, broom::tidy)) %>% 
+  select(env_par, tidy) %>% 
+  unnest(tidy) %>%
+  mutate(comparison = case_when(comparison == "8-3" ~ "8 vs 3",
+                                comparison == "20-3" ~ "20 vs 3",
+                                comparison == "20-8" ~ "20 vs 8",
+                                comparison == "2mBottom-3" ~ "2mBottom vs 3" ,
+                                comparison ==  "2mBottom-8" ~ "2mBottom vs 8",
+                                comparison ==  "2mBottom-20" ~  "2mBottom vs 20"))
+
+write.csv(stats.sum.depth.Tukey, "C:/Users/rrocha/Documents/R/phd/2016/output/data/anova_env_summary_depth_tukey.csv")
+
+# correlation of env_parameters and depth
+MH_env.depth.south.na <- combDF.south %>% drop_na() %>% 
+  rownames_to_column(var = "id") %>% select(-Depth) %>% column_to_rownames(var = "id")
+cor.tab.spearman <- MH_env.depth.south.na %>% data.matrix() %>% cor(method = "spearman")
+cor.tab.pearson <- MH_env.depth.south.na %>% data.matrix() %>% cor(method = "pearson")
+signif(cor.tab.spearman,2)
+# now, using Hmisc package - return the p-values
+source("http://www.sthda.com/upload/rquery_cormat.r")
+p.corr.meta <- rquery.cormat(MH_env.depth.south.na,type="flatten", graph=TRUE, graphType="correlogram")$r
+# write.csv(p.corr.meta, "C:/Users/rrocha/Documents/R/phd/2016/output/data/corr_env_summary_south_depth.csv")
+
+```
+
+## Beta Diversity
+
+### Compositional Biplot
+
+```{r beta div}
+
+#----- Compositional biplot-------
+# Singlular value decompositon method of making a PCA (base R)
+# Samples must be ROWS and features/OTUs as COLUMNs
+pcx.abund <- prcomp(t(d.clr.abund.filt.mh.south))
+screeplot(pcx.abund)
+str(pcx.abund)
+
+p1 <- fviz_pca_biplot(pcx.abund, 
+                      # Individuals (samples)
+                      geom.ind = "point",
+                      habillage=MH_env.depth.south$Depth, col.ind = "black",
+                      pointshape = 21, pointsize = 2,
+                       palette = c("darkred", "darkgreen", "blue", "darkblue"),
+                      addEllipses = TRUE,
+                      ellipse.level=0.75,   # data ellipses encompass 75% of the points in a group.
+                      geom.var = F,
+                      legend.title = "Depth (m)",
+                      title = "Depth Profile - Southern region") 
+p1
+
+```
+
+### Cluster analysis
+
+```{r cluster}
+# Determine number of clusters using factoextra
+# First we will use enhanced k-means clustering
+# Enhanced k-means clustering
+res.km <- factoextra::eclust(t(d.clr.abund.filt.mh.south), "kmeans", nstart = 25, graph = FALSE)
+
+# cluster plot
+fviz_cluster(res.km, ellipse.type = "norm", ellipse.alpha = 0,
+             repel = TRUE )+
+  scale_colour_manual(values = c("darkblue","darkred","darkgreen")) +
+  scale_fill_manual(values = c("darkblue","darkred","darkgreen")) +
+  theme_minimal() +
+  theme(legend.position = "none")
+  
+
+# Gap statistic plot
+fviz_gap_stat(res.km$gap_stat)
+# Silhouette plot
+fviz_silhouette(res.km)
+print(fviz_silhouette(res.km, print.summary = FALSE)) +
+        scale_fill_brewer()
+```
+
+
+### Community Composition - Depth profile
+
+```{r function freq table}
+# function to get abundance table
+abund.table <- function(ab.table, TAXdf, taxo) {
+  cols <- c(taxo, 'Sample') 
+ df <-  ab.table %>% rownames_to_column('otu') %>% 
+    pivot_longer(!otu, names_to = "Sample", values_to = "Abundance") %>%
+    left_join(TAXdf %>% rownames_to_column('otu')) %>%
+    group_by_at(vars(all_of(cols))) %>%
+    summarise(Abundance = sum(Abundance)) %>%
+    pivot_wider(names_from = 'Sample', values_from = 'Abundance') %>%
+    column_to_rownames(taxo)
+}
+
+# mutate(Family.Genus = paste(Family, Genus, sep = "_")) 
+# if want to paste Family and Genus
+
+```
+
+
+```{r freq table} 
+
+#phylum
+stats.phylum <- abund.table(d.filt.mh.south , TAXdf, "Phylum") %>%
+  rownames_to_column('Taxa') %>%
+  rowwise() %>%
+  mutate(n = sum(c_across(cols = names(d.filt.mh.south))),
+         mean = mean(c_across(cols = names(d.filt.mh.south))),
+         stdev = sd(c_across(cols = names(d.filt.mh.south)))) %>%
+  mutate(freq = round(100*(n/sum(.$n)),2)) %>%
+  column_to_rownames('Taxa') %>%
+  select(n,mean,stdev,freq) %>%
+  arrange(desc(freq))
+head(stats.phylum)
+
+# Class
+stats.class <- abund.table(d.filt.mh.south , TAXdf, "Class") %>%
+  rownames_to_column('Taxa') %>%
+  rowwise() %>%
+  mutate(n = sum(c_across(cols = names(d.filt.mh.south))),
+         mean = mean(c_across(cols = names(d.filt.mh.south))),
+         stdev = sd(c_across(cols = names(d.filt.mh.south)))) %>%
+  mutate(freq = round(100*(n/sum(.$n)),2)) %>%
+  column_to_rownames('Taxa') %>%
+  select(n,mean,stdev,freq) %>%
+  arrange(desc(freq))
+
+head(stats.class)
+
+# Family
+stats.family <- abund.table(d.filt.mh.south , TAXdf, "Family") %>%
+  rownames_to_column('Taxa') %>%
+  rowwise() %>%
+  mutate(n = sum(c_across(cols = names(d.filt.mh.south))),
+         mean = mean(c_across(cols = names(d.filt.mh.south))),
+         stdev = sd(c_across(cols = names(d.filt.mh.south)))) %>%
+  mutate(freq = round(100*(n/sum(.$n)),2)) %>%
+  column_to_rownames('Taxa') %>%
+  select(n,mean,stdev,freq) %>%
+  arrange(desc(freq))
+
+head(stats.family)
+
+# keep the environment tidy
+rm(list=setdiff(ls(), c('seed',"meta","OTUdf",'pseq.all', 'pseq.list', 'TAXdf', 'TAX.table','cols_site_layer', 'cols_layer')))
+source('~/R/phd/2016/script/1st_chpt/my_functions.R')
+source('~/R/phd/2016/script/1st_chpt/theme_publication.R')
+```
+
+```{r freq table by group}
+# phylum by depth
+freq.phylum <- summarize_taxa(pseq.filt.south, "Phylum", 'Depth', arrange = TRUE, top_rank = NULL) %>%
+                  slice_head(n=5) # here we can change to increase or decrease the number
+freq.phylum <- freq.phylum %>% select(-Abundance) %>%
+                              pivot_wider(names_from = Phylum, values_from = freq)
+freq.phylum
+
+# class by depth
+freq.class <- summarize_taxa(pseq.filt.south, "Class", 'Depth', arrange = TRUE, top_rank = NULL) %>%
+                        slice_head(n=5) %>% 
+                         select(-Abundance) %>%
+                         pivot_wider(names_from = Class, values_from = freq)
+freq.class
+```
+
+### Boxplots - Vertical profile
+
+```{r boxplot - Phylum}
+# get the top 11 more abundant phyla in all dataset
+phylum.subset <- stats.phylum %>% slice_max(freq, n = 11) %>% rownames_to_column("taxa") %>%  pull(taxa)
+
+# subset 
+ps_phylum <- pseq.filt.rel.south %>% subset_taxa(Phylum %in% phylum.subset) %>%
+  phyloseq::tax_glom("Phylum")
+phyloseq::taxa_names(ps_phylum) <- phyloseq::tax_table(ps_phylum)[, "Phylum"]
+
+# Let’s generate box plots according to group and 
+# facet them by phylum using the raw counts. 
+box.phylum <- psmelt.dplyr(ps_phylum) %>%
+  ggplot(data = ., aes(x = Depth, y = Abundance)) +
+  geom_boxplot(outlier.shape  = NA) +
+  geom_jitter(aes(color = OTU), height = 0, width = .2) +
+ # labs(x = "Depth (m)", y = "Relative Abundance (%)\n") +
+  scale_y_continuous(labels=scales::percent)+
+  facet_wrap(~ OTU, scales = "free") +
+  theme(legend.position = 'none') +
+  ggtitle("Southern region - Phylum")
+
+box.phylum + theme_Publication() + theme(legend.position = "none") +
+ labs(x = "Depth (m)", y = "Relative Abundance (%)\n") # theme_publication.R
+```
+
+```{r boxplot - Class}
+class.subset <- stats.class %>%  rownames_to_column("taxa") %>%
+  filter(taxa != 'unknown') %>% slice_max(freq, n = 11) %>% pull(taxa) 
+
+ps_class <- pseq.filt.rel.south %>% subset_taxa(Class %in% class.subset) %>%
+  phyloseq::tax_glom("Class")
+phyloseq::taxa_names(ps_class) <- phyloseq::tax_table(ps_class)[, "Class"]
+# phyloseq::otu_table(ps_class) # phyloseq object 
+# teste <- QsRutils::veganotu(ps_phylum) # as matrix samples by ROWS
+
+box.class <- psmelt.dplyr(ps_class) %>%
+  ggplot(data = ., aes(x = Depth, y = Abundance)) +
+  geom_boxplot(outlier.shape  = NA) +
+  geom_jitter(aes(color = OTU), height = 0, width = .2) +
+  #labs(x = "Depth (m)", y = "Relative Abundance (%)\n") +
+  scale_y_continuous(labels=scales::percent)+
+  facet_wrap(~ OTU, scales = "free") +
+  theme(legend.position = 'none') +
+  ggtitle("Southern region - Class") 
+
+box.class + theme_Publication()+theme(legend.position = "none") +
+  labs(x = "Depth (m)", y = "Relative Abundance (%)\n") # theme_publication.R
+```
+
+### Ordination
+
+```{r dbRDA}
+# statistical testing
+# It is important that both datasets have the same rownames order
+d.clr.abund.filt.mh.south <- t(d.clr.abund.filt.mh.south)[match(row.names(MH_env.depth.south),row.names(t(d.clr.abund.filt.mh.south))),]
+d.clr.abund.filt.mh.south <- t(d.clr.abund.filt.mh.south) # samples as column
+# performing PerMANOVA to test the hypothesis that bacterial communities within each group
+# are more similar to each other than those under other groups. 
+# perform PerMANOVA using Euclidean distances (for RDA)
+vegan::adonis(vegdist(t(d.clr.abund.filt.mh.south), method='euclidean') ~ Depth, 
+              data=MH_env.depth.south, permutations = 9999) # only southern transect and without outliers
+pairwiseAdonis::pairwise.adonis2(dist(t(d.clr.abund.filt.mh.south), method='euclidean') ~ Depth, data=MH_env.depth.south, permutations = 9999)
+# test for 'Depth', which has the most power.
+# dispersion
+disp <- dist(t(d.clr.abund.filt.mh.south), method = 'euclidean')
+mh.bd <- betadisper(disp, MH_env.depth.south$Depth)
+anova(mh.bd)
+permutest(mh.bd)
+boxplot(mh.bd, xlab="Depth",  col=c("gray", "red", "green","blue"))
+
+# unconstrained ordination (RDA)
+# prepare the data
+apply(MH_env.depth.south, 2, function(x) any(is.na(x))) # check for NAs
+MH_env.depth.south.na <- MH_env.depth.south %>% drop_na()
+X <- select_if(MH_env.depth.south.na,is.numeric) %>% 
+  dplyr::select(DO, Salinity, Temperature, Nitrogen, Carbon, TSSmean, CN)
+X <- vegan::decostand(X, method='standardize')
+summary(X)
+samples.na <- MH_env.depth.south %>% drop_na()
+Y <- d.clr.abund.filt.mh.south %>% t() %>% as.data.frame() %>% 
+  rownames_to_column(var = "sample_id") %>% 
+  filter(sample_id %in% samples.na$sample_id) %>% 
+  column_to_rownames(var = "sample_id")
+
+# RDA
+res <- rda(Y ~ ., data=X)
+plot(res, xlab=QsRutils::ord_labels(res)[1], ylab=QsRutils::ord_labels(res)[2])
+
+# dbRDA 
+# note the result is the same as for RDA when using euclidean distances
+res <- capscale(Y ~ ., data=X, distance='euclidean')
+plot(res, xlab=QsRutils::ord_labels(res)[1], ylab=QsRutils::ord_labels(res)[2])
+
+# exploring statistically
+# summary of the results
+summary(res, display=NULL)
+
+## select only the variables that are explaining variation efficiently.
+# calculate variance inflation factors (VIF)
+# variables with scores >10 are redundant
+sort(vif.cca(res))
+
+# Fitting environmental vectors/factors onto an ordination 
+# calculate fit
+bio.fit <- envfit(Y ~ ., data=X)
+
+# Stepwise selection (ordistep)
+# set up full and null models for 'ordistep'
+# full model
+rda1 <- rda(Y ~ ., data=X)
+# intercept-only (null) model
+rda0 <- rda(Y ~ 1, data=X)
+
+# perform forward and backward selection of explanatory variables
+# output not shown
+step.env <- ordistep(rda0, scope=formula(rda1), direction='both')
+# look at the significant variables 
+step.env$anova
+# For the sake of argument, let’s include the variables
+# with low VIF scores along with those identified by ordistep.
+# code to get variable names from 'ordistep' and 'envfit' results
+vars.ordistep <- gsub('^. ', '', rownames(step.env$anova))
+vars.biofit <- names(which(bio.fit$vectors$pvals <= 0.01))
+vars.envfit <- names(which(vif.cca(res) <= 10))
+vars <- unique(c(vars.ordistep, vars.envfit,vars.biofit))
+vars 
+# select variables to keep from table 'Y'
+X1 <- X[, vars]
+str(X1)
+
+# RDA
+res <- rda(Y ~ ., data=X1)
+
+# summary of the results
+summary(res, display=NULL)
+# permutation test of statistical significance
+anova(res)
+```
+
+
+```{r plotting ordination}
+# set up dataframes for plotting the results
+sit <- cbind(MH_env.depth.south.na, scores(res, display='sites')) 
+sit$cluster <- as.factor(sit$cluster)
+spp <- cbind(data.frame(TAX.filt.mh.south), scores(res, display='species'))
+vec <- data.frame(scores(res, display='bp'))
+
+# use these to adjust length of arrows and position of arrow labels
+adj.vec <- 2
+adj.txt <- 2.5
+
+# 'site' ordination
+p1 <- ggplot(sit, aes(x=RDA1, y=RDA2, color=cluster)) +
+  geom_point(size=3) + 
+  geom_segment(data=vec, inherit.aes=F, 
+               mapping=aes(x=0, y=0, xend=adj.vec*RDA1, yend=adj.vec*RDA2), 
+               arrow=arrow(length=unit(0.2, 'cm')),alpha=0.5) + 
+  geom_text(data=vec, inherit.aes=F, 
+            mapping=aes(x=adj.txt*RDA1, y=adj.txt*RDA2, 
+                        label=c(rownames(vec))),alpha=0.5) +
+  labs(colour = "Cluster")+ #another way to set the labels, in this case, for the colour legend
+  theme_bw()
+p1$labels$x <- QsRutils::ord_labels(res)[1]
+p1$labels$y <- QsRutils::ord_labels(res)[2]
+
+p1
+
+```
+
+
+```{r var part}
+# Variation partitioning
+
+# extract the sample data from the 'phyloseq' object
+# then remove the 'SampleID' column
+# for only categorical predictors - standardize
+dat <- MH_env.depth.south.na[, c("Depth","DO","Salinity","Temperature", "Carbon", "Nitrogen", "TSSmean")] 
+
+# use standardised categorical and continuous predictors in the constraint (X)
+X <- ade4::dudi.mix(dat, scannf=F, nf=2)$tab
+names(X)
+# define the partitions
+# MH variables from ordistep and envfit analyses
+X1 <- X[, c("DO","Salinity","Temperature", "Carbon", "Nitrogen", "TSSmean")] 
+# Depth variables
+X2 <- X[, grep('^Depth', names(X), value=T)]
+
+# partition variation and plot the result
+vp <- varpart(Y, X1, X2)
+plot(vp, Xnames=c('Env', 'Depth'), bg = c("hotpink","skyblue"))
+```
+
+
+### Mantel test
+```{r mantel}
+#abundance data frame
+abund = data.frame(t(d.clr.abund.filt.mh.south))
+#abundance data frame - bray curtis dissimilarity
+dist.abund = dist(abund, method = "euclidean")
+#make subset
+env = MH_env.depth.south[,c(7:12)]
+#scale data 
+scale.env = scale(env, center = TRUE, scale = TRUE)
+#create distance matrix of scaled data
+dist.env = dist(scale.env, method = "euclidean")
+
+#run mantel test 
+#abundance vs environmental
+abund_env = mantel(dist.abund, dist.env, method = "spearman", permutations = 9999, na.rm = TRUE)
+abund_env
+
+
+# Pairwise scatter plots
+aa = as.vector(dist.abund)
+tt = as.vector(dist.env)
+
+#new data frame with vectorized distance matrices
+mat = data.frame(aa,tt)
+
+#abundance vs env paramters
+lm = lm(aa~tt, data = mat)
+summary(lm)
+my.formula <- aa~tt
+mm = ggplot(mat, aes(y = aa, x = tt)) + 
+  geom_point(size = 3, alpha = 0.5) + 
+  labs(x = "Difference in Env Factors", y = "Euclidean Distance", title = "Depth Profile") + 
+  geom_smooth(method = "lm", colour = "black", alpha = 0.2) +
+  ggpmisc::stat_poly_eq(formula = my.formula, 
+                        aes(label = paste(..eq.label.., ..rr.label.., sep = "~~~")), 
+                        parse = TRUE,
+                        label.x.npc = "left", label.y.npc = 75) +   
+  ggpmisc::stat_fit_glance(method = 'lm',
+                           geom = 'text',
+                           aes(label = paste("P-value = ", signif(..p.value.., digits = 4),
+                                             sep = ""))) +
+  theme( axis.text.x = element_text(face = "bold",colour = "black", size = 12), 
+         axis.text.y = element_text(face = "bold", size = 11, colour = "black"), 
+         axis.title= element_text(face = "bold", size = 14, colour = "black"), 
+         panel.background = element_blank(), 
+         panel.border = element_rect(fill = NA, colour = "black"),
+         legend.position = "top")
+
+mm
+```
+
+### Differential Abundance
+
+```{r ALDEx2}
+# generate the datasets by making dataframes with surface samples and dataframes with the conditions
+# here, can use all dataset or the filtered dataset
+# testing if OTUs are different between two conditions (clusters)?
+# get the samples from each cluster
+samples.cluster1 <- d.filt.mh.south %>% dplyr::select(ends_with("3"))
+samples.cluster1.south <- d.filt.mh.south %>% dplyr::select(ends_with("3") & contains("S"))
+samples.cluster2 <- d.filt.mh.south %>% dplyr::select(ends_with("8")) 
+samples.cluster3 <- d.filt.mh.south %>% dplyr::select(ends_with("20"), ends_with("30")) 
+
+# make the conditions
+d.aldex.1.2 <- d.filt.mh.south %>% dplyr::select(ends_with("3") | ends_with("8") )
+d.aldex.1.3 <- d.filt.mh.south %>% dplyr::select(ends_with("3") | ends_with("20") | ends_with("30") )
+d.aldex.2.3 <- d.filt.mh.south %>% dplyr::select(ends_with("8") | ends_with("20") | ends_with("30") )
+
+# make a vector containing the two names of the conditions
+# in the same order as in the column names
+## To know how many samples per depth
+s3 <-  length(grep("_3$", colnames(d.filt.mh.south))) # use $ to match the end of a line
+s8 <- length(grep("_8", colnames(d.filt.mh.south)))
+s20 <- length(grep("_20", colnames(d.filt.mh.south)))
+s30 <- length(grep("_30", colnames(d.filt.mh.south)))
+
+# conditions (clusters)
+conds.aldex.1.2 <- c(rep("1", s3), rep("2", s8))
+conds.aldex.1.3 <- c(rep("1",s3), rep("3", s20), rep("3", s30))
+conds.aldex.2.3 <- c(rep("2", s8), rep("3", s20), rep("3", s30))
+
+## CHECK this vector in your console by typing: 
+conds.aldex.2.3
+#    This should match the order and number of columns you have: 
+colnames(d.aldex.2.3)
+
+# Calculate the Kruskal-Wallis test and glm ANOVA statistics
+## x.w <- ALDEx2::aldex.kw(x)
+x.all.1.2 <- ALDEx2::aldex(d.aldex.1.2 , conds.aldex.1.2, mc.samples=128, test="t", effect=TRUE, include.sample.summary=FALSE, verbose=FALSE)
+x.all.1.3 <- ALDEx2::aldex(d.aldex.1.3 , conds.aldex.1.3, mc.samples=128, test="t", effect=TRUE, include.sample.summary=FALSE, verbose=FALSE)
+x.all.2.3 <- ALDEx2::aldex(d.aldex.2.3 , conds.aldex.2.3, mc.samples=128, test="t", effect=TRUE, include.sample.summary=FALSE, verbose=FALSE)
+
+# generate a datasetc with all OTUs with effect size > |2|
+x.all.1.2 <- x.all.1.2 %>% rownames_to_column(var = "OTU")
+x.all.1.3 <- x.all.1.3 %>% rownames_to_column(var = "OTU")
+x.all.2.3 <- x.all.2.3 %>% rownames_to_column(var = "OTU")
+
+all.eff.OTU <- x.all.1.2 %>% full_join(x.all.1.3, by = "OTU") %>% 
+  full_join(.,x.all.2.3, by = "OTU") 
+all.eff.OTU.filt <- all.eff.OTU %>% 
+  filter(effect.x >= 2 | effect.x <= -2 | effect.y >= 2 | effect.y <= -2 | effect >= 2 | effect <= -2) %>%
+  'rownames<-'(.[,1])
+
+x.all.1.2 <- x.all.1.2 %>% column_to_rownames(var = "OTU")
+x.all.1.3 <- x.all.1.3 %>% column_to_rownames(var = "OTU")
+x.all.2.3 <- x.all.2.3 %>% column_to_rownames(var = "OTU")
+
+# make a table with taxa names
+all.eff.OTU.taxa <- all.eff.OTU %>% dplyr::select(OTU) %>% left_join(TAXdf %>% rownames_to_column('OTU'))
+
+all.eff.OTU.filt <- all.eff.OTU.filt %>% left_join(TAXdf %>% rownames_to_column('OTU'))
+
+# get the name of OTUs for plotting
+all.eff.OTU.nm <- all.eff.OTU.taxa$OTU
+
+
+```
+
+```{r sig table}
+# Get the OTUs with an effect size greater than |2|
+# for example, in the condition conds.aldex.1.2 <- c(rep("1", s3), rep("3", s8)) = cluster i vs cluster ii
+# OTUs with a higher relative abundance in cluster i will have positive effect 
+# values, OTUs higher in cluster ii will have negative effect values
+# we can use Wilcoxon test results: wi.eBH (FDR), or raw p values (wi.ep, we.ep)
+# from either test 
+TAX.table <- TAXdf %>% rownames_to_column('OTU')
+# 3m vs 8m
+sig.all.1.2 <- x.all.1.2 %>% 
+  mutate(OTU = row.names(.)) %>%         # create a new column OTU
+  filter(effect >= 2 | effect <= -2) %>% # filter the data
+  left_join(TAX.table) %>%               # name OTU
+  arrange(Phylum, Class, dplyr::desc(effect)) %>%       # sort by effect size
+  column_to_rownames('OTU')
+# 3m vs 20-30m
+sig.all.1.3 <- x.all.1.3 %>% 
+  mutate(OTU = row.names(.)) %>%         # create a new column OTU
+  filter(effect >= 2 | effect <= -2) %>% # filter the data
+  left_join(TAX.table) %>%               # name OTU
+  arrange(Phylum, Class, dplyr::desc(effect)) %>%       # sort by effect size
+  column_to_rownames('OTU')   
+# 8m vs 20-30m
+sig.all.2.3 <- x.all.2.3 %>% 
+  mutate(OTU = row.names(.)) %>%         # create a new column OTU
+  filter(effect >= 2 | effect <= -2) %>% # filter the data
+  left_join(TAX.table) %>%               # name OTU
+  arrange(Phylum, Class,dplyr::desc(effect)) %>%       # sort by effect size
+  column_to_rownames('OTU')   
+
+write.csv(sig.all.1.2, "C:/Users/rrocha/Documents/R/phd/2016/output/data/aldex.1.2.csv")
+write.csv(sig.all.1.3, "C:/Users/rrocha/Documents/R/phd/2016/output/data/aldex.1.3.csv")
+write.csv(sig.all.2.3, "C:/Users/rrocha/Documents/R/phd/2016/output/data/aldex.2.3.csv")
+```
+
+```{r function strip plotting}
+# function for strip chart (CoDaSeq.R)
+plot_strip <- function(table.aldex, taxa, cond) {
+  x <- enquo(taxa)
+  DA <- ggplot(table.aldex, aes(y=!!x, x=effect)) + 
+    geom_vline(xintercept = 0.0, color = "gray", size = 1)+
+    geom_vline(xintercept = c(-2,2), linetype="dashed") +
+    geom_point(aes(fill=effect1), size=3.5,shape=21, alpha = 0.3) + 
+    theme(legend.key = element_rect(fill="white"), panel.grid.major = element_line(size = 0.5, 
+                                                                                   linetype = "solid", colour = "grey"), panel.background = element_rect(fill="white",colour="grey50"), 
+          axis.text.x = element_text(angle = -90, hjust = 0, vjust=0.5,face = "bold",colour = "black"),
+          axis.title.x = element_text(face = "bold"),
+          axis.title.y = element_text(face = "bold",angle=90,vjust =2),
+          axis.text.y = element_text(face = "bold", colour = "black")) +
+    labs(fill = "Effect Size") +
+    ylab("Taxa") + 
+    xlab(cond) +
+    scale_fill_manual(values = c("blue", "red", "gray")) +
+    # scale_x_continuous(limits = c(-3, 3)) +
+    theme(panel.grid.minor.x=element_blank(),
+          panel.grid.major.x=element_blank())
+  DA
+}
+```
+
+```{r strip plot Phylum}
+# Prepare the table from ALDEX (see Rmd MH_2016_bac)
+# select sig phylum to plot
+phylum.aldex <- sig.all.1.2 %>% distinct(Phylum) %>% 
+  bind_rows(sig.all.2.3 %>% distinct(Phylum)) %>% 
+  bind_rows(sig.all.1.3 %>% distinct(Phylum)) %>%
+  distinct(Phylum) %>% pull(Phylum)
+
+table.aldex.1.2 <- x.all.1.2  %>%
+  rownames_to_column(var="OTU") %>%
+  mutate(effect1 = case_when (                # create a column with effect size labels
+    effect >= 2  ~ "> 2",
+    effect <= -2 ~ "< -2",
+    effect < 2 & effect > -2 ~ "no effect"))  %>% # nmake a column with effect sizes
+  'rownames<-'(.[,1]) %>% 
+  left_join(TAX.table) %>%                       # name OTU
+  arrange(dplyr::desc(Phylum)) %>%               # sort by Phylum
+  filter(OTU %in% all.eff.OTU.filt$OTU) %>%      # filter OTUs
+  filter(Phylum %in% phylum.aldex) %>%
+  column_to_rownames('OTU') 
+
+table.aldex.2.3 <- x.all.2.3  %>%
+  rownames_to_column(var="OTU") %>%
+  mutate(effect1 = case_when (                # create a column with effect size labels
+    effect >= 2  ~ "> 2",
+    effect <= -2 ~ "< -2",
+    effect < 2 & effect > -2 ~ "no effect"))  %>% # nmake a column with effect sizes
+  'rownames<-'(.[,1]) %>% 
+  left_join(TAX.table) %>%                       # name OTU
+  arrange(dplyr::desc(Phylum)) %>%               # sort by Phylum
+  filter(OTU %in% all.eff.OTU.filt$OTU)%>%      # filter OTUs
+  filter(Phylum %in% phylum.aldex) %>%
+  column_to_rownames('OTU') 
+
+# PHYLUM
+p1.phylum <- plot_strip(table.aldex.1.2, Phylum, "Effect Size") +
+  ggtitle("Cluster I <--> Cluster II")+
+  scale_x_continuous(limits = c(-3, 3)) +
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.position = "none", 
+        axis.title.x = element_text(size = 10),
+        axis.text.y = element_text(size = 11),
+        plot.margin = unit(c(3,0.1,3,3), "cm")) #top, right, bottom, left
+  
+p2.phylum <- plot_strip(table.aldex.2.3, Phylum,"Effect Size")  + 
+  ggtitle("Cluster II <--> Cluster III")+
+  scale_x_continuous(limits = c(-3, 3)) +
+  theme(plot.title = element_text(hjust = 0.5),
+    legend.position = "none", 
+        axis.text.y=element_blank(), 
+        axis.title.y = element_blank(),
+       # axis.ticks.y = element_blank(),
+        axis.title.x = element_text(size = 10),
+        plot.margin = unit(c(3,3,3,0.1), "cm"))
+
+p1.phylum+p2.phylum
+```
+
+```{r strip plot Class}
+# CLASS
+p.class.aldex <- c("Actinobacteriota", "Bacteroidota")
+
+table.aldex.1.2 <- x.all.1.2  %>%
+  rownames_to_column(var="OTU") %>%
+  mutate(effect1 = case_when (                # create a column with effect size labels
+    effect >= 2  ~ "> 2",
+    effect <= -2 ~ "< -2",
+    effect < 2 & effect > -2 ~ "no effect"))  %>% # nmake a column with effect sizes
+  'rownames<-'(.[,1]) %>% 
+  left_join(TAX.table) %>%                       # name OTU
+  arrange(dplyr::desc(Phylum)) %>%               # sort by Phylum
+  filter(OTU %in% all.eff.OTU.filt$OTU) %>%      # filter OTUs
+  filter(Phylum %in% p.class.aldex) %>%
+  column_to_rownames('OTU') 
+
+table.aldex.2.3 <- x.all.2.3  %>%
+  rownames_to_column(var="OTU") %>%
+  mutate(effect1 = case_when (                # create a column with effect size labels
+    effect >= 2  ~ "> 2",
+    effect <= -2 ~ "< -2",
+    effect < 2 & effect > -2 ~ "no effect"))  %>% # nmake a column with effect sizes
+  'rownames<-'(.[,1]) %>% 
+  left_join(TAX.table) %>%                       # name OTU
+  arrange(dplyr::desc(Phylum)) %>%               # sort by Phylum
+  filter(OTU %in% all.eff.OTU.filt$OTU)%>%      # filter OTUs
+  filter(Phylum %in% p.class.aldex) %>%
+  column_to_rownames('OTU') 
+
+# Class
+p1.class <- plot_strip(table.aldex.1.2, Class, "Effect Size" )+ 
+  ggtitle("Cluster I <--> Cluster II")+
+  facet_grid(Phylum ~ ., space="free_x", scales="free_y", switch="y") +
+  scale_x_continuous(limits = c(-3, 3)) +
+  xlab("")+
+  theme(strip.placement = "outside",
+        strip.background = element_rect(fill=NA,colour=NA),
+        panel.spacing=unit(0,"cm"), axis.title.y = element_blank(),
+        axis.title.x = element_text(size = 10)) +
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.position = "none")
+ # theme(plot.margin = unit(c(3,0,3,3), "cm")) #top, right, bottom, left
+
+p2.class <- plot_strip(table.aldex.2.3, Class, "Effect Size")+ 
+  ggtitle("Cluster II <--> Cluster III")+
+  xlab("")+
+  facet_grid(Phylum ~ ., space="free_x", scales="free_y", switch="y")  +
+  scale_x_continuous(limits = c(-3, 3)) +
+  theme(strip.text.y =element_blank(),panel.spacing=unit(0,"cm")) +
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.position = "none", axis.text.y=element_blank(), 
+        axis.title.y = element_blank(),
+        axis.title.x = element_text(size = 10)) 
+
+# only Proteobacteria Phylum
+p.proteobacteria.aldex <- c("Proteobacteria")
+
+table.aldex.1.2 <- x.all.1.2  %>%
+  rownames_to_column(var="OTU") %>%
+  mutate(effect1 = case_when (                # create a column with effect size labels
+    effect >= 2  ~ "> 2",
+    effect <= -2 ~ "< -2",
+    effect < 2 & effect > -2 ~ "no effect"))  %>% # nmake a column with effect sizes
+  'rownames<-'(.[,1]) %>% 
+  left_join(TAX.table) %>%                       # name OTU
+  arrange(dplyr::desc(Phylum)) %>%               # sort by Phylum
+  filter(OTU %in% all.eff.OTU.filt$OTU) %>%      # filter OTUs
+  filter(Phylum %in% p.proteobacteria.aldex) %>%
+  column_to_rownames('OTU') 
+
+table.aldex.2.3 <- x.all.2.3  %>%
+  rownames_to_column(var="OTU") %>%
+  mutate(effect1 = case_when (                # create a column with effect size labels
+    effect >= 2  ~ "> 2",
+    effect <= -2 ~ "< -2",
+    effect < 2 & effect > -2 ~ "no effect"))  %>% # nmake a column with effect sizes
+  'rownames<-'(.[,1]) %>% 
+  left_join(TAX.table) %>%                       # name OTU
+  arrange(dplyr::desc(Phylum)) %>%               # sort by Phylum
+  filter(OTU %in% all.eff.OTU.filt$OTU)%>%      # filter OTUs
+  filter(Phylum %in% p.proteobacteria.aldex) %>%
+  column_to_rownames('OTU') 
+
+# Class
+p1.class.p <- plot_strip(table.aldex.1.2, Class, "Effect Size" )+ 
+#  ggtitle("Cluster I <--> Cluster II")+
+  facet_grid(Phylum ~ ., space="free_x", scales="free_y", switch="y") +
+  scale_x_continuous(limits = c(-3, 3)) +
+  theme(strip.placement = "outside",
+        strip.background = element_rect(fill=NA,colour=NA),
+        panel.spacing=unit(0,"cm"), axis.title.y = element_blank(),
+        axis.title.x = element_text(size = 10)) +
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.position = "none") 
+ # theme(plot.margin = unit(c(3,0,3,3), "cm")) #top, right, bottom, left
+
+p2.class.p <- plot_strip(table.aldex.2.3, Class, "Effect Size")+ 
+ # ggtitle("Cluster II <--> Cluster III")+
+  facet_grid(Phylum ~ ., space="free_x", scales="free_y", switch="y")  +
+  scale_x_continuous(limits = c(-3, 3)) +
+  theme(strip.text.y =element_blank(),panel.spacing=unit(0,"cm")) +
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.position = "none", axis.text.y=element_blank(), 
+        axis.title.y = element_blank(),
+        axis.title.x = element_text(size = 10)) 
+ # theme(plot.margin = unit(c(3,3,3,0), "cm")) #top, right, bottom, left
+
+egg::ggarrange(p1.class,p2.class,p1.class.p,p2.class.p, ncol = 2,nrow=2, widths = c(1,1))
+```
+
+```{r strip plot Family}
+# Family - 
+
+# Bacteroidia
+c.bact.aldex <- c("Bacteroidia")
+
+table.aldex.1.2 <- x.all.1.2  %>%
+  rownames_to_column(var="OTU") %>%
+  mutate(effect1 = case_when (                # create a column with effect size labels
+    effect >= 2  ~ "> 2",
+    effect <= -2 ~ "< -2",
+    effect < 2 & effect > -2 ~ "no effect"))  %>% # nmake a column with effect sizes
+  'rownames<-'(.[,1]) %>% 
+  left_join(TAX.table) %>%                       # name OTU
+  arrange(dplyr::desc(Phylum)) %>%               # sort by Phylum
+  filter(OTU %in% all.eff.OTU.filt$OTU) %>%      # filter OTUs
+  filter(Class %in% c.bact.aldex) %>%
+  column_to_rownames('OTU') 
+
+table.aldex.1.3 <- x.all.1.3  %>%
+  rownames_to_column(var="OTU") %>%
+  mutate(effect1 = case_when (                # create a column with effect size labels
+    effect >= 2  ~ "> 2",
+    effect <= -2 ~ "< -2",
+    effect < 2 & effect > -2 ~ "no effect"))  %>% # nmake a column with effect sizes
+  'rownames<-'(.[,1]) %>% 
+  left_join(TAX.table) %>%                       # name OTU
+  arrange(dplyr::desc(Phylum)) %>%               # sort by Phylum
+  filter(OTU %in% all.eff.OTU.filt$OTU) %>%      # filter OTUs
+  filter(Class %in% c.bact.aldex) %>%
+  column_to_rownames('OTU') 
+
+table.aldex.2.3 <- x.all.2.3  %>%
+  rownames_to_column(var="OTU") %>%
+  mutate(effect1 = case_when (                # create a column with effect size labels
+    effect >= 2  ~ "> 2",
+    effect <= -2 ~ "< -2",
+    effect < 2 & effect > -2 ~ "no effect"))  %>% # nmake a column with effect sizes
+  'rownames<-'(.[,1]) %>% 
+  left_join(TAX.table) %>%                       # name OTU
+  arrange(dplyr::desc(Phylum)) %>%               # sort by Phylum
+  filter(OTU %in% all.eff.OTU.filt$OTU)%>%      # filter OTUs
+  filter(Class %in% c.bact.aldex) %>%
+  column_to_rownames('OTU') 
+
+#Plotting
+p1.bact <- plot_strip(table.aldex.1.2, Family, "Effect size")+
+  ggtitle("Cluster I <--> Cluster II")+ 
+  facet_grid(Class ~ ., space="free_x", scales="free_y", switch="y") +
+  scale_x_continuous(limits = c(-3, 3)) +
+  theme(plot.title = element_text(hjust = 0.5),strip.placement = "outside",
+        strip.background = element_rect(fill=NA,colour=NA),
+        panel.spacing=unit(0,"cm"), axis.title.y = element_blank(),
+        axis.title.x = element_text(size = 10)) +
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.position = "none") +
+  theme(plot.margin = unit(c(3,0.1,3,3), "cm")) #top, right, bottom, left
+
+p2.bact <- plot_strip(table.aldex.2.3, Family, "Effect size")+ 
+  ggtitle("Cluster II <--> Cluster III")+ 
+  facet_grid(Class ~ ., space="free_x", scales="free_y", switch="y") +
+  scale_x_continuous(limits = c(-3, 3)) +
+  theme(strip.text.y =element_blank(),panel.spacing=unit(0,"cm")) +
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.position = "none", axis.text.y=element_blank(), 
+        axis.title.y = element_blank(),
+        axis.title.x = element_text(size = 10)) +
+  theme(plot.margin = unit(c(3,3,3,0.1), "cm")) #top, right, bottom, left
+
+egg::ggarrange(p1.bact,p2.bact,ncol = 2,widths = c(1,1))
+
+#Gammaproteobacteria
+c.Gamma.aldex <- c("Gammaproteobacteria")
+
+table.aldex.1.2 <- x.all.1.2  %>%
+  rownames_to_column(var="OTU") %>%
+  mutate(effect1 = case_when (                # create a column with effect size labels
+    effect >= 2  ~ "> 2",
+    effect <= -2 ~ "< -2",
+    effect < 2 & effect > -2 ~ "no effect"))  %>% # nmake a column with effect sizes
+  'rownames<-'(.[,1]) %>% 
+  left_join(TAX.table) %>%                       # name OTU
+  arrange(dplyr::desc(Phylum)) %>%               # sort by Phylum
+  filter(OTU %in% all.eff.OTU.filt$OTU) %>%      # filter OTUs
+  filter(Class %in% c.Gamma.aldex) %>%
+  column_to_rownames('OTU') 
+
+table.aldex.2.3 <- x.all.2.3  %>%
+  rownames_to_column(var="OTU") %>%
+  mutate(effect1 = case_when (                # create a column with effect size labels
+    effect >= 2  ~ "> 2",
+    effect <= -2 ~ "< -2",
+    effect < 2 & effect > -2 ~ "no effect"))  %>% # nmake a column with effect sizes
+  'rownames<-'(.[,1]) %>% 
+  left_join(TAX.table) %>%                       # name OTU
+  arrange(dplyr::desc(Phylum)) %>%               # sort by Phylum
+  filter(OTU %in% all.eff.OTU.filt$OTU)%>%      # filter OTUs
+  filter(Class %in% c.Gamma.aldex) %>%
+  column_to_rownames('OTU')
+
+#Plotting
+p1.gamma <- plot_strip(table.aldex.1.2, Family, "Effect size")+
+ # ggtitle("Cluster I <--> Cluster II")+ 
+  facet_grid(Class ~ ., space="free_x", scales="free_y", switch="y") +
+  scale_x_continuous(limits = c(-3, 3)) +
+  theme(plot.title = element_text(hjust = 0.5),strip.placement = "outside",
+        strip.background = element_rect(fill=NA,colour=NA),
+        panel.spacing=unit(0,"cm"), axis.title.y = element_blank(),
+        axis.title.x = element_text(size = 10)) +
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.position = "none") #+
+  theme(plot.margin = unit(c(3,0.1,3,3), "cm")) #top, right, bottom, left
+
+p2.gamma <- plot_strip(table.aldex.2.3, Family, "Effect size")+ 
+ # ggtitle("Cluster II <--> Cluster III")+ 
+  facet_grid(Class ~ ., space="free_x", scales="free_y", switch="y") +
+  scale_x_continuous(limits = c(-3, 3)) +
+  theme(strip.text.y =element_blank(),panel.spacing=unit(0,"cm")) +
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.position = "none", axis.text.y=element_blank(), 
+        axis.title.y = element_blank(),
+        axis.title.x = element_text(size = 10)) #+
+  theme(plot.margin = unit(c(3,3,3,0.1), "cm")) #top, right, bottom, left
+
+# Alphaproteobacteria
+c.Alpha.aldex <- c("Alphaproteobacteria")
+
+table.aldex.1.2 <- x.all.1.2  %>%
+  rownames_to_column(var="OTU") %>%
+  mutate(effect1 = case_when (                # create a column with effect size labels
+    effect >= 2  ~ "> 2",
+    effect <= -2 ~ "< -2",
+    effect < 2 & effect > -2 ~ "no effect"))  %>% # nmake a column with effect sizes
+  'rownames<-'(.[,1]) %>% 
+  left_join(TAX.table) %>%                       # name OTU
+  arrange(dplyr::desc(Phylum)) %>%               # sort by Phylum
+  filter(OTU %in% all.eff.OTU.filt$OTU) %>%      # filter OTUs
+  filter(Class %in% c.Alpha.aldex) %>%
+  column_to_rownames('OTU') 
+
+table.aldex.1.3 <- x.all.1.3  %>%
+  rownames_to_column(var="OTU") %>%
+  mutate(effect1 = case_when (                # create a column with effect size labels
+    effect >= 2  ~ "> 2",
+    effect <= -2 ~ "< -2",
+    effect < 2 & effect > -2 ~ "no effect"))  %>% # nmake a column with effect sizes
+  'rownames<-'(.[,1]) %>% 
+  left_join(TAX.table) %>%                       # name OTU
+  arrange(dplyr::desc(Phylum)) %>%               # sort by Phylum
+  filter(OTU %in% all.eff.OTU.filt$OTU) %>%      # filter OTUs
+  filter(Class %in% c.Alpha.aldex) %>%
+  column_to_rownames('OTU') 
+
+table.aldex.2.3 <- x.all.2.3  %>%
+  rownames_to_column(var="OTU") %>%
+  mutate(effect1 = case_when (                # create a column with effect size labels
+    effect >= 2  ~ "> 2",
+    effect <= -2 ~ "< -2",
+    effect < 2 & effect > -2 ~ "no effect"))  %>% # nmake a column with effect sizes
+  'rownames<-'(.[,1]) %>% 
+  left_join(TAX.table) %>%                       # name OTU
+  arrange(dplyr::desc(Phylum)) %>%               # sort by Phylum
+  filter(OTU %in% all.eff.OTU.filt$OTU)%>%      # filter OTUs
+  filter(Class %in% c.Alpha.aldex) %>%
+  column_to_rownames('OTU') 
+
+#Plotting
+p1.alpha <- plot_strip(table.aldex.1.2, Family, "Effect size")+
+  ggtitle("Cluster I <--> Cluster II")+ 
+  facet_grid(Class ~ ., space="free_x", scales="free_y", switch="y") +
+  scale_x_continuous(limits = c(-3, 3)) +
+  xlab("")+
+  theme(plot.title = element_text(hjust = 0.5),strip.placement = "outside",
+        strip.background = element_rect(fill=NA,colour=NA),
+        panel.spacing=unit(0,"cm"), axis.title.y = element_blank(),
+        axis.title.x = element_text(size = 10)) +
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.position = "none") #+
+theme(plot.margin = unit(c(3,0.1,3,3), "cm")) #top, right, bottom, left
+
+p2.alpha <- plot_strip(table.aldex.2.3, Family, "Effect size")+ 
+ ggtitle("Cluster II <--> Cluster III")+ 
+  facet_grid(Class ~ ., space="free_x", scales="free_y", switch="y") +
+  scale_x_continuous(limits = c(-3, 3)) +
+  xlab("")+
+  theme(strip.text.y =element_blank(),panel.spacing=unit(0,"cm")) +
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.position = "none", axis.text.y=element_blank(), 
+        axis.title.y = element_blank(),
+        axis.title.x = element_text(size = 10))# +
+theme(plot.margin = unit(c(3,3,3,0.1), "cm")) #top, right, bottom, left
+
+# Gamma + Alpha
+egg::ggarrange(p1.alpha,p2.alpha,p1.gamma,p2.gamma,ncol = 2,nrow=2,widths = c(1,1))
+```
+
+```{r strip Genus}
+# GENUS
+# "Methylophilaceae" has only one OTU (OM43 clade) which are spread among detphs
+f.genus.aldex <- c.family.aldex <- c("Rhodobacteraceae", "Flavobacteriaceae")
+
+table.aldex.1.2 <- x.all.1.2  %>%
+  rownames_to_column(var="OTU") %>%
+  mutate(effect1 = case_when (                # create a column with effect size labels
+    effect >= 2  ~ "> 2",
+    effect <= -2 ~ "< -2",
+    effect < 2 & effect > -2 ~ "no effect"))  %>% # nmake a column with effect sizes
+  'rownames<-'(.[,1]) %>% 
+  left_join(TAX.table) %>%                       # name OTU
+  arrange(dplyr::desc(Phylum)) %>%               # sort by Phylum
+  filter(OTU %in% all.eff.OTU.filt$OTU) %>%      # filter OTUs
+  filter(Family %in% f.genus.aldex) %>%
+  column_to_rownames('OTU') 
+
+table.aldex.2.3 <- x.all.2.3  %>%
+  rownames_to_column(var="OTU") %>%
+  mutate(effect1 = case_when (                # create a column with effect size labels
+    effect >= 2  ~ "> 2",
+    effect <= -2 ~ "< -2",
+    effect < 2 & effect > -2 ~ "no effect"))  %>% # nmake a column with effect sizes
+  'rownames<-'(.[,1]) %>% 
+  left_join(TAX.table) %>%                       # name OTU
+  arrange(dplyr::desc(Phylum)) %>%               # sort by Phylum
+  filter(OTU %in% all.eff.OTU.filt$OTU)%>%      # filter OTUs
+  filter(Family %in% f.genus.aldex) %>%
+  column_to_rownames('OTU') 
+
+# plotting
+p1.genus <- plot_strip(table.aldex.1.2, Genus, "Effect size")+
+  ggtitle("Cluster I <--> Cluster II")+ 
+  facet_grid(Family ~ ., space="free_x", scales="free_y", switch="y") +
+  scale_x_continuous(limits = c(-3, 3)) +
+  theme(plot.title = element_text(hjust = 0.5),strip.placement = "outside",
+        strip.background = element_rect(fill=NA,colour=NA),
+        panel.spacing=unit(0,"cm"), axis.title.y = element_blank(),
+        axis.title.x = element_text(size = 10)) +
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.position = "none") +
+  theme(plot.margin = unit(c(2,0.1,2,3), "cm")) #top, right, bottom, left
+
+p2.genus <- plot_strip(table.aldex.2.3, Genus, "Effect size")+ 
+  ggtitle("Cluster II <--> Cluster III")+ 
+  facet_grid(Family ~ ., space="free_x", scales="free_y", switch="y") +
+  scale_x_continuous(limits = c(-3, 3)) +
+  theme(strip.text.y =element_blank(),panel.spacing=unit(0,"cm")) +
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.position = "none", axis.text.y=element_blank(), 
+        axis.title.y = element_blank(),
+        axis.title.x = element_text(size = 10)) +
+  theme(plot.margin = unit(c(2,3,2,0.1), "cm")) #top, right, bottom, left
+
+egg::ggarrange(p1.genus,p2.genus,ncol = 2,widths = c(1,1))
+```
+
+### Random Florest - Classification
+
+```{r prep RF}
+# load packages
+pkgs <- c("caretEnsemble", "caret", "randomForest", "tidyverse") # Load packages
+invisible(sapply(pkgs,require, character = TRUE))
+
+# Agglomerate all taxonomic levels
+pm.ps.phylum = tax_glom(pseq.filt.south, "Phylum", NArm = TRUE, bad_empty=c(NA, "", " ", "\t")) 
+phy.mat <- pm.ps.phylum %>% psmelt() %>%
+  group_by(Phylum, cluster1, Sample) %>% 
+  summarise(Sample, cluster1, Phylum, Abundance) %>%
+  pivot_wider(names_from = Phylum, values_from = Abundance) %>%
+  mutate(Phylum, as.character) %>%
+  ungroup() %>%
+  dplyr::rename(clusterind = cluster1) %>%
+  relocate(clusterind, .after = where(is.numeric)) %>%
+  column_to_rownames('Sample')
+
+pm.ps.class = tax_glom(pseq.filt.south, "Class", NArm = TRUE, bad_empty=c(NA, "", " ", "\t"))
+class.mat <- pm.ps.class %>% psmelt() %>%
+  group_by(Class, cluster1, Sample) %>% 
+  summarise(Sample, cluster1, Class, Abundance) %>%
+  pivot_wider(names_from = Class, values_from = Abundance) %>%
+  mutate(Class, as.character) %>%
+  ungroup() %>%
+  dplyr::rename(clusterind = cluster1) %>%
+  relocate(clusterind, .after = where(is.numeric)) %>%
+  column_to_rownames('Sample')
+
+pm.ps.order = tax_glom(pseq.filt.south, "Order", NArm = TRUE, bad_empty=c(NA, "", " ", "\t"))
+order.mat <- pm.ps.order %>% psmelt() %>%
+  group_by(Order, cluster1, Sample) %>% 
+  summarise(Sample, cluster1, Order, Abundance) %>%
+  pivot_wider(names_from = Order, values_from = Abundance) %>%
+  mutate(Order, as.character) %>%
+  ungroup() %>%
+  dplyr::rename(clusterind = cluster1) %>%
+  relocate(clusterind, .after = where(is.numeric)) %>%
+  column_to_rownames('Sample')
+
+pm.ps.family = tax_glom(pseq.filt.south, "Family", NArm = TRUE, bad_empty=c(NA, "", " ", "\t"))
+family.mat <- pm.ps.family %>% psmelt() %>%
+  group_by(Family, cluster1, Sample) %>% 
+  summarise(Sample, cluster1, Family, Abundance) %>%
+  pivot_wider(names_from = Family, values_from = Abundance) %>%
+  mutate(Family, as.character) %>%
+  ungroup() %>%
+  dplyr::rename(clusterind = cluster1) %>%
+  relocate(clusterind, .after = where(is.numeric)) %>%
+  column_to_rownames('Sample')
+
+pm.ps.genus = tax_glom(pseq.filt.south, "Genus", NArm = TRUE, bad_empty=c(NA, "", " ", "\t"))
+genus.mat <- pm.ps.genus %>% psmelt() %>%
+  group_by(Genus, cluster1, Sample) %>% 
+  dplyr::summarise(Sample, cluster1, Genus, Abundance) %>%
+  pivot_wider(names_from = Genus, values_from = Abundance) %>%
+  mutate(Genus, as.character) %>%
+  ungroup() %>%
+  dplyr::rename(clusterind = cluster1) %>%
+  relocate(clusterind, .after = where(is.numeric)) %>%
+  column_to_rownames('Sample')
+
+# Convert to matrix
+# Store taxa count matrices in a list
+taxalist<-list(phy.mat,class.mat,order.mat,family.mat,genus.mat)
+listNames<-c("Phylum", "Class", "Order","Family", "Genus")
+names(taxalist)<-listNames
+
+
+# Randomize the observations (samples) across all levels of taxonomic resolution for cluster
+for (i in 1:length(taxalist)){
+  taxalist[[i]] <- taxalist[[i]] %>% sample_n(nrow(taxalist[[i]]))
+}
+
+local.models<-taxalist
+
+# Loop the caretlist models across all levels of taxonomic resolution
+
+# Cluster
+for(i in 1:length(local.models)){
+  local.models[[i]]<-caretList(clusterind~.,
+                               data=local.models[[i]], ntree=501,
+                               trControl=trctrlbase, tuneList=modtypesbase)
+}
+
+
+local.models
+# Create dataframe of model stats
+local.models[[1]][["rf"]][["finalModel"]] # conf matrix of phylum local model
+```
+
+
+```{r figure imp-RF}
+# data = RF list of each taxa --> local.models
+impvars.class.cluster<-caret::varImp(local.models$Class$rf)
+impvars.class.cluster
+write.csv(impvars.class.cluster, "C:/Users/rrocha/Documents/R/phd/2016/output/data/impvars_class.csv")
+
+# 10 most important classes
+x <- row.names(impvars.class.cluster[1:10,])
+y <- impvars.class.cluster[1:10,]$max
+#y<-impvars.class.cluster[1:10,4]
+vImp.df <- as.data.frame(cbind(x,y))
+vImp.df[,2] <- as.numeric(as.character(vImp.df[,2])) # Have to use as.char before as.num, factors are stored internally as integers, need to apply factor level labels (actual values) or it will convert to integer codes, non numeric chars such as . ruins this.
+vImp.df$x <- as.factor(vImp.df$x)
+class(vImp.df$x) # Factor
+class(vImp.df$y)
+
+vImp.df=vImp.df %>%
+  arrange(y) %>%
+  mutate(x=factor(x,x)) %>%
+  arrange(desc(y))
+
+vImp.class <- vImp.df$x # to be used to plot ALDEX plot effect size
+
+# Plot variable importance of these top 10
+plot.varImp = ggplot(vImp.df, aes(x=x, y=y)) +
+  geom_segment( aes(x=x, xend=x, y=0, yend=y ), color=ifelse(vImp.df$x %in% c("Alphaproteobacteria", "Gammaproteobacteria", "Actinobacteria"), "#F7756D", "#00BEC4"), size=ifelse(vImp.df$x %in% c("A","D"), .08, .5) ) +
+  geom_point( color=ifelse(vImp.df$x %in% c("Alphaproteobacteria", "Gammaproteobacteria", "Actinobacteria"), "#F7756D", "#00BEC4"), size=ifelse(vImp.df$x %in% c("A","D"), 5, 3) ) +
+  theme_light() +
+  coord_flip() +
+  theme(
+    legend.position="none",
+    panel.grid.major.y = element_blank(),
+    panel.border = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.text.y = element_text(size = 12, face = "bold"),
+    axis.title.x = element_text(size = 12, face = "bold"),
+    axis.title.y = element_text(size = 12, face = "bold")
+    ) +
+  xlab("Class Predictor - Bacteria") +
+  ylab("Overall Variable Importance (%)")
+plot.varImp
+
+```
+
+```{r function to plot RF-Aldex}
+# change the function only to get te same y-axis legend as the RF plot (grey and bold)
+plot_strip.rf <- function(table.aldex, taxa, cond) {
+  x <- enquo(taxa)
+  DA <- ggplot(table.aldex, aes(y=!!x, x=effect)) + 
+    geom_vline(xintercept = 0.0, color = "gray", size = 1)+
+    geom_vline(xintercept = c(-2,2), linetype="dashed") +
+    geom_point(aes(fill=effect1), size=3.5,shape=21, alpha = 0.3) + 
+    theme(legend.key = element_rect(fill="white"), panel.grid.major = element_line(size = 0.5, 
+                                                                                   linetype = "solid", colour = "grey"), panel.background = element_rect(fill="white",colour="grey50"), 
+          axis.text.x = element_text(angle = -90, hjust = 0, vjust=0.5,face = "bold",colour = "black"),
+          axis.title.x = element_text(face = "bold"),
+          axis.title.y = element_text(face = "bold",angle=90,vjust =2),
+          axis.text.y = element_text(size = 12,face = "bold")) + # changed here
+    labs(fill = "Effect Size") +
+    ylab("Taxa") + 
+    xlab(cond) +
+    scale_fill_manual(values = c("blue", "red", "gray")) +
+    # scale_x_continuous(limits = c(-3, 3)) +
+    theme(panel.grid.minor.x=element_blank(),
+          panel.grid.major.x=element_blank())
+  DA
+}
+```
+
+
+```{r tables RF and Aldex2}
+# ALDEX plot with the most important classes identified by RF 
+# see figures_machine_learning.R
+vImp.class
+
+table.aldex.1.2 <- x.all.1.2  %>%
+  rownames_to_column(var="OTU") %>%
+  mutate(effect1 = case_when (                # create a column with effect size labels
+    effect >= 2  ~ "> 2",
+    effect <= -2 ~ "< -2",
+    effect < 2 & effect > -2 ~ "no effect"))  %>% # nmake a column with effect sizes
+  'rownames<-'(.[,1]) %>% 
+  left_join(TAX.table) %>%                       # name OTU
+  arrange(dplyr::desc(Phylum)) %>%               # sort by Phylum
+  filter(OTU %in% all.eff.OTU.filt$OTU) %>%      # filter OTUs
+  filter(Class %in% vImp.class) %>%
+  arrange(factor(Class, levels = vImp.class)) %>%
+  column_to_rownames('OTU') 
+
+table.aldex.1.3 <- x.all.1.3  %>%
+  rownames_to_column(var="OTU") %>%
+  mutate(effect1 = case_when (                # create a column with effect size labels
+    effect >= 2  ~ "> 2",
+    effect <= -2 ~ "< -2",
+    effect < 2 & effect > -2 ~ "no effect"))  %>% # nmake a column with effect sizes
+  'rownames<-'(.[,1]) %>% 
+  left_join(TAX.table) %>%                       # name OTU
+  arrange(dplyr::desc(Phylum)) %>%               # sort by Phylum
+  filter(OTU %in% all.eff.OTU.filt$OTU) %>%      # filter OTUs
+  filter(Class %in% vImp.class) %>%
+  arrange(factor(Class, levels = vImp.class)) %>%
+  column_to_rownames('OTU') 
+
+table.aldex.2.3 <- x.all.2.3  %>%
+  rownames_to_column(var="OTU") %>%
+  mutate(effect1 = case_when (                # create a column with effect size labels
+    effect >= 2  ~ "> 2",
+    effect <= -2 ~ "< -2",
+    effect < 2 & effect > -2 ~ "no effect"))  %>% # nmake a column with effect sizes
+  'rownames<-'(.[,1]) %>% 
+  left_join(TAX.table) %>%                       # name OTU
+  arrange(dplyr::desc(Phylum)) %>%               # sort by Phylum
+  filter(OTU %in% all.eff.OTU.filt$OTU)%>%      # filter OTUs
+  filter(Class %in% vImp.class) %>%
+  arrange(factor(Class, levels = vImp.class)) %>%
+  column_to_rownames('OTU') 
+
+
+write.csv(table.aldex.1.2,"C:/Users/rrocha/Documents/R/phd/2016/output/data/aldex_rf/aldex_rf_1.2.csv")
+write.csv(table.aldex.2.3,"C:/Users/rrocha/Documents/R/phd/2016/output/data/aldex_rf/aldex_rf_2.3.csv")
+write.csv(table.aldex.1.3,"C:/Users/rrocha/Documents/R/phd/2016/output/data/aldex_rf/aldex_rf_1.3.csv")
+```
+
+
+```{r plots RF and Aldex2}
+p1.rf.class <- plot_strip.rf(table.aldex.1.2, Class, "Effect size")+
+  ggtitle("Cluster I <--> Cluster II")+
+  #facet_grid(Phylum ~ ., space="free_x", scales="free_y", switch="y") +
+  scale_x_continuous(limits = c(-3, 3)) +
+  scale_y_discrete(limits = unique(rev(table.aldex.1.2$Class))) +
+ # xlab("")+
+  theme(strip.placement = "outside",
+        strip.background = element_rect(fill=NA,colour=NA),
+        panel.spacing=unit(0,"cm"), axis.title.y = element_blank(),
+        axis.title.x = element_text(size = 10)) +
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.position = "none")
+
+p2.rf.class <- plot_strip(table.aldex.2.3, Class, "Effect Size")+ 
+  ggtitle("Cluster II <--> Cluster III")+
+  theme(strip.placement = "outside",
+        strip.background = element_rect(fill=NA,colour=NA),
+        panel.spacing=unit(0,"cm"), axis.title.y = element_blank()) +
+  scale_x_continuous(limits = c(-3, 3)) +
+  scale_y_discrete(limits = unique(rev(table.aldex.2.3$Class))) +
+  theme(strip.text.y =element_blank(),panel.spacing=unit(0,"cm")) +
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.position = "none", 
+        axis.title.x = element_text(size = 10),
+        axis.text.y = element_blank())
+
+p3.rf.class <- plot_strip(table.aldex.1.3, Class, "Effect size") +
+  ggtitle(" Cluster I <--> Cluster III") + 
+  #facet_grid(Phylum ~ ., space="free_x", scales="free_y", switch="y") +
+  theme(strip.placement = "outside",
+        strip.background = element_rect(fill=NA,colour=NA),
+        panel.spacing=unit(0,"cm"), axis.title.y = element_blank()) +
+  scale_x_continuous(limits = c(-3, 3)) +
+  scale_y_discrete(limits = unique(rev(table.aldex.1.3$Class))) +
+  theme(strip.text.y =element_blank(),panel.spacing=unit(0,"cm")) +
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.position = "none", 
+        axis.title.x = element_text(size = 10),
+        axis.text.y = element_blank()) #top, right, bottom, left
+
+# using patchwork package to plot the 2 graphs
+plot.varImp + p3.rf.class + p1.rf.class + p2.rf.class
+```
+
+
+
+# Archaeal Community
+
+```{r data prep}
+# prepare the data
+## OTU table
+OTUdf <- read.csv("SPE_arc_MH16.csv",  row.names = 1, head = TRUE)
+# taxonomy table
+TAXdf <- read.csv("tax_arc_2016.csv", row.names = 1, head = TRUE)
+#str(TAXdf)
+# check for NAs
+#sum(is.na(TAXdf))
+#apply(TAXdf, 2, function(x) any(is.na(x)))
+arc.seqs <- TAXdf %>% rownames_to_column("otu") %>% select(otu, seq)
+TAXdf <- TAXdf  %>% 
+  rownames_to_column('id') %>%
+  mutate(across(everything(), ~replace_na(.x, "unknown"))) %>% 
+  filter(Phylum != 'unknown') %>%
+  mutate(across(where(is.character), as.factor)) %>%
+  select(-seq) %>%
+  column_to_rownames('id')
+TAX.table <- TAXdf %>% rownames_to_column(var = "OTU") # to use in left_joint function
+
+# make sure that the same OTUs are the same in both datasets
+abund.df <- base::subset(OTUdf, row.names(OTUdf) %in% row.names(TAXdf))
+
+## meta data
+MH_env <- read.csv("MH16_env.csv", row.names = 1)
+#str(MH_env)
+MH_env$Depth <- as.factor(MH_env$Depth) # Depth as factor = treatment
+
+# southern region without outliers
+outliers <- c("ocean_3", "KR_3", "GR_3", "GR_8") # aka non-MH samples
+# southern transect without outliers
+d.mh.south <- abund.df %>% dplyr::select(starts_with("S") & -all_of(outliers))
+TAX.mh.south <- base::subset(TAXdf, row.names(TAXdf) %in% row.names(d.mh.south))
+## meta data
+MH_env.depth.south <- base::subset(MH_env, row.names(MH_env) %in% names(d.mh.south))
+MH_env.depth.south <-MH_env.depth.south %>%
+  mutate(Depth =  dplyr::recode(Depth, '30' = "2mBottom")) %>%
+  mutate_if(is.character,as.factor) %>%
+  "row.names<-"(.$sample_id) 
+
+# Phyloseq Object
+pseq.mh.south <- phyloseq(otu_table(as.matrix(as.data.frame(d.mh.south)), taxa_are_rows = TRUE), 
+                          tax_table(as.matrix(TAX.mh.south)), sample_data(MH_env.depth.south))
+```
+
+```{r relative abundance}
+rel.arc.phylum <- abund.table(d.filt, TAXdf, 'Phylum') %>%
+  rownames_to_column('Taxa') %>%
+  rowwise() %>%
+  mutate(n = sum(c_across(cols = names(d.filt))),
+         mean = mean(c_across(cols = names(d.filt))),
+         stdev = sd(c_across(cols = names(d.filt)))) %>%
+  mutate(freq = round(100*(n/sum(.$n)),2)) %>%
+  column_to_rownames('Taxa') %>%
+  select(n,mean,stdev,freq) %>%
+  arrange(desc(freq))
+
+rel.arc.family <- abund.table(d.filt, TAXdf, 'Family') %>%
+  rownames_to_column('Taxa') %>%
+  rowwise() %>%
+  mutate(n = sum(c_across(cols = names(d.filt))),
+         mean = mean(c_across(cols = names(d.filt))),
+         stdev = sd(c_across(cols = names(d.filt)))) %>%
+  mutate(freq = round(100*(n/sum(.$n)),2)) %>%
+  column_to_rownames('Taxa') %>%
+  select(n,mean,stdev,freq) %>%
+  arrange(desc(freq))
+
+```
+
+## Alpha diversity
+```{r stats}
+# Alpha Diversity -> alpha_div.R
+
+combDF.south <- MH_env.depth.south %>% drop_na() %>%
+  dplyr::select("Depth", "Chao1_arc","Shannon_arc")
+data_long <- combDF.south %>% gather(key="env_par", value="value", -Depth)
+meta_mh_summary <- data_long%>% group_by(Depth, env_par)%>%
+  summarise(mean= mean(value), sd= sd(value), max = max(value),min = min(value))
+# last format on excel
+write.csv(meta_mh_summary, "C:/Users/rrocha/Documents/R/phd/2016/output/data/meta_mh_south_summary_arc.csv")
+
+# sorting axis for plot
+data_long$env_par <- factor(data_long$env_par, levels=c("Chao1_arc","Shannon_arc"))
+
+# plot
+p.meta.depth <- data_long %>% 
+  ggplot(aes(x=Depth, y=value)) +
+  geom_boxplot(aes(color = Depth), outlier.color = NA) +
+  coord_flip() +
+  scale_x_discrete(limits = rev(levels(data_long$Depth)))+
+  geom_jitter(aes(color = Depth), alpha=0.6) +
+  facet_wrap(~ env_par, scales = "free") +
+  labs(y = "")
+p.meta.depth
+# to improve the legends
+# https://jkzorz.github.io/2019/07/09/scatter-plots.html
+
+# function for publication in theme_publication.R
+
+p.meta.depth + scale_colour_Publication()+ theme_Publication() + 
+  labs(title="Environmental Parameters - Depth Profle")+theme(legend.position = "none")
+
+
+# Using MicrobiomeSeq code modified
+env.depth.anova.arc <- plot_anova_env(pseq.mh.south, grouping_column = "Depth", pValueCutoff = 0.001, 
+                                  select.variables = c("Chao1_arc", "Shannon_arc"))
+env.depth.anova.arc +  theme_Publication() + 
+  labs(title="Diversity Indices - Archaeal Community - Depth Profle") + theme(legend.position = "none") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+xlab("Depth (m)")
+
+# if it's not working use the code below (probably there is no significance) -> use print.lines = FALSE
+env.depth.anova.arc <- plot_anova_env(pseq.mh.south, grouping_column = "Depth", pValueCutoff = 0.001,
+                                     select.variables = c("Chao1_arc", "Shannon_arc"), print.lines = FALSE)
+env.depth.anova.arc +  theme_Publication() + 
+  labs(title="Diversity Indices - Archaeal Community - Depth Profle") + theme(legend.position = "none") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+xlab("Depth") 
+
+
+
+# STATS  
+# making summary tables (ANOVA and Tukey)
+stats.sum.depth <- data_long %>% 
+  nest(data = c(Depth, value)) %>% 
+  mutate(model = map(data, ~anova(lm(value ~ Depth, .))), 
+         tidy = map(model, broom::tidy)) %>% 
+  select(env_par, tidy) %>% 
+  unnest(tidy)
+write.csv(stats.sum.depth, "C:/Users/rrocha/Documents/R/phd/2016/output/data/anova_env_summary_depth_arc.csv")
+
+stats.sum.depth.Tukey <- data_long %>% 
+  nest(data = c(Depth, value)) %>% 
+  mutate(model = map(data, ~TukeyHSD(aov(lm(value ~ Depth, .)))), 
+         tidy = map(model, broom::tidy)) %>% 
+  select(env_par, tidy) %>% 
+  unnest(tidy) %>%
+  mutate(comparison = case_when(comparison == "8-3" ~ "8 vs 3",
+                                comparison == "20-3" ~ "20 vs 3",
+                                comparison == "20-8" ~ "20 vs 8",
+                                comparison == "2mBottom-3" ~ "2mBottom vs 3" ,
+                                comparison ==  "2mBottom-8" ~ "2mBottom vs 8",
+                                comparison ==  "2mBottom-20" ~  "2mBottom vs 20"))
+
+write.csv(stats.sum.depth.Tukey, "C:/Users/rrocha/Documents/R/phd/2016/output/data/anova_env_summary_depth_tukey_arc.csv")
+```
+
+```{r correlation}
+# correlation of env_parameters and depth
+MH_env.mh.south.na <- combDF.south %>% drop_na() %>% 
+  rownames_to_column(var = "id") %>% select(-Depth) %>% column_to_rownames(var = "id")
+cor.tab.spearman <- MH_env.depth.south.na %>% data.matrix() %>% cor(method = "spearman")
+cor.tab.pearson <- MH_env.depth.south.na %>% data.matrix() %>% cor(method = "pearson")
+signif(cor.tab.spearman,2)
+# now, using Hmisc package - return the p-values
+source("http://www.sthda.com/upload/rquery_cormat.r")
+p.corr.meta <- rquery.cormat(MH_env.mh.south.na,type="flatten", graph=TRUE, graphType="correlogram")$r
+write.csv(p.corr.meta, "C:/Users/rrocha/Documents/R/phd/2016/output/data/corr_env_summary_south_depth.csv")
+
+
+rm(list=ls()[! ls() %in% c("seed", "MH_env","MH_env.depth.south", "OTUdf","TAXdf","TAX.table","d.mh.south", "abund.df", "pseq.mh.south")])
+```
+
+## Beta Diversity
+```{r data prep}
+# filtering data and clr-transformation
+min.prop=0.001 # minimum proportion in any sample (default)
+min.occurrence=0.001 # minimum occurrence across all samples (sparsity filter)
+# only surface and without outliers
+d.filt0.mh.south <- CoDaSeq::codaSeq.filter(d.mh.south, min.prop=0, min.occurrence=0, samples.by.row=FALSE)
+d.filt.mh.south <- CoDaSeq::codaSeq.filter(d.filt0.mh.south, min.prop=min.prop, max.prop=1, min.occurrence=min.occurrence, samples.by.row=FALSE)
+d.zero.hand.mh.south <- t(zCompositions::cmultRepl(t(d.filt.mh.south), label =0, method="CZM")) # filtered
+d.clr.abund.filt.mh.south <- CoDaSeq::codaSeq.clr(d.zero.hand.mh.south, samples.by.row = FALSE)
+TAX.filt.mh.south <- base::subset(TAXdf, row.names(TAXdf) %in% row.names(d.filt.mh.south))
+
+# pseq object
+pseq.mh.south.clr <- phyloseq(otu_table(as.matrix(as.data.frame(d.clr.abund.filt.mh.south)), taxa_are_rows = TRUE), 
+                          tax_table(as.matrix(TAX.filt.mh.south)), sample_data(MH_env.depth.south))
+```
+
+```{r compositional biplot}
+# Singlular value decompositon method of making a PCA (base R)
+# Samples must be ROWS and features/OTUs as COLUMNs
+pcx.abund <- prcomp(t(d.clr.abund.filt.mh.south))
+screeplot(pcx.abund)
+str(pcx.abund)
+
+p1 <- fviz_pca_biplot(pcx.abund, 
+                      # Individuals (samples)
+                      geom.ind = "point",
+                      habillage=MH_env.depth.south$Depth, col.ind = "black",
+                      pointshape = 21, pointsize = 2,
+                      palette = c("darkred", "darkgreen", "blue", "darkblue"),
+                      addEllipses = TRUE,
+                      ellipse.level=0.75,   # data ellipses encompass 75% of the points in a group.
+                      geom.var = F,
+                      legend.title = "Depth (m)",
+                      title = "Depth Profile - Southern region") 
+p1
+```
+
+```{r clustering}
+# Determine number of clusters using factoextra
+# First we will use enhanced k-means clustering
+# Enhanced k-means clustering
+res.km <- factoextra::eclust(t(d.clr.abund.filt.mh.south), "kmeans", nstart = 25, graph = FALSE)
+
+# cluster plot
+fviz_cluster(res.km, ellipse.type = "norm", ellipse.alpha = 0,
+             repel = TRUE )+
+  scale_colour_manual(values = c("darkblue","darkred","darkgreen")) +
+  scale_fill_manual(values = c("darkblue","darkred","darkgreen")) +
+  theme_minimal() +
+  theme(legend.position = "none")
+  
+
+# Gap statistic plot
+fviz_gap_stat(res.km$gap_stat)
+# Silhouette plot
+fviz_silhouette(res.km)
+print(fviz_silhouette(res.km, print.summary = FALSE)) +
+        scale_fill_brewer()
+```
+
+## Ordination
+
+```{r}
+# statistical testing
+# It is important that both datasets have the same rownames order
+d.clr.abund.filt.mh.south <- t(d.clr.abund.filt.mh.south)[match(row.names(MH_env.depth.south),row.names(t(d.clr.abund.filt.mh.south))),]
+d.clr.abund.filt.mh.south <- t(d.clr.abund.filt.mh.south)
+# performing PerMANOVA to test the hypothesis that bacterial communities within each group
+# are more similar to each other than those under other groups. 
+# perform PerMANOVA using Euclidean distances (for RDA)
+vegan::adonis(vegdist(t(d.clr.abund.filt.mh.south), method='euclidean') ~ Depth, 
+              data=MH_env.depth.south, permutations = 9999) # only southern transect and without outliers
+pairwiseAdonis::pairwise.adonis2(dist(t(d.clr.abund.filt.mh.south), method='euclidean') ~ Depth, data=MH_env.depth.south, permutations = 9999)
+# test for 'Depth', which has the most power.
+# dispersion
+disp <- dist(t(d.clr.abund.filt.mh.south), method = 'euclidean')
+mh.bd <- betadisper(disp, MH_env.depth.south$Depth)
+str(MH_env.depth.south)
+anova(mh.bd)
+permutest(mh.bd)
+boxplot(mh.bd, xlab="Depth",  col=c("gray", "red", "green","blue"))
+# p-value is <0.001, so adonis assumption is not fine (homogeneous dispersion)
+# Apparently, the samples from the surface is quite disperse (dispersion within this group)
+# Then, the p-value of adonis can be influenced by the difference in composition within the surface group
+## Permutation test for F
+pmod <- permutest(mh.bd, permutations = 9999, pairwise = TRUE)
+pmod$tab
+## Has permustats() method
+pstat <- permustats(pmod)
+densityplot(pstat, scales = list(x = list(relation = "free")))
+qqmath(pstat, scales = list(relation = "free"))
+
+
+# Ordination with phyloseq - only OTUs
+# Get the phyloseq object with the OTU clr-transformed and filtered
+# phyloseq object with filtered and clr-transformed
+
+# non-filtered data
+MH.clr.ord <- ordinate(pseq.mh.south , method = "RDA")
+p.samp.ord = plot_ordination(pseq.mh.south , MH.clr.ord, type="samples", color = "Depth")
+print(p.samp.ord)
+p.otu.ord = plot_ordination(pseq.mh.south , MH.clr.ord, type="taxa", color = "Phylum", 
+                            title = "PCA on Aitichson Distance - Archaeal Genera")
+p.otu.ord + facet_wrap(~Genus)
+
+# filtered data
+MH.clr.ord.clr <- ordinate(pseq.mh.south.clr , method = "RDA")
+p.samp.ord.clr = plot_ordination(pseq.mh.south.clr , MH.clr.ord.clr, type="samples", color = "Depth")
+p.samp.ord.clr  + theme_Publication()
+p.otu.ord.clr = plot_ordination(pseq.mh.south.clr , MH.clr.ord.clr, type="taxa", color = "Phylum", 
+                            title = "PCA on Aitichson Distance - Archaeal Genera")
+p.otu.ord.clr + facet_wrap(~Genus) + theme_Publication()
+
+# unconstrained ordination (RDA)
+# prepare the data
+apply(MH_env.depth.south, 2, function(x) any(is.na(x))) # check for NAs
+MH_env.depth.south.na <- MH_env.depth.south %>% drop_na()
+X <- select_if(MH_env.depth.south.na,is.numeric) %>% 
+  dplyr::select(DO, Salinity, Temperature, Nitrogen, Carbon, TSSmean, CN)
+X <- vegan::decostand(X, method='standardize')
+summary(X)
+samples.na <- MH_env.depth.south %>% drop_na()
+Y <- d.clr.abund.filt.mh.south %>% t() %>% as.data.frame() %>% 
+  rownames_to_column(var = "sample_id") %>% 
+  filter(sample_id %in% samples.na$sample_id) %>% 
+  column_to_rownames(var = "sample_id")
+
+
+# as observed in PERMONOVA/betadispersion analyses, the dispersion in surface samples is high
+# So, let's exclude them from the analysis
+# run after the RDA with all the samples
+Y <- d.clr.abund.filt.mh.south %>% t() %>% as.data.frame() %>% 
+  rownames_to_column(var = "sample_id") %>% 
+  filter(sample_id %in% samples.na$sample_id) %>% 
+  filter(!grepl(c('_3$|S5_30'), sample_id)) %>%
+  column_to_rownames(var = "sample_id")
+X <- subset(X,row.names(X) %in% row.names(Y))
+
+# RDA
+res <- rda(Y ~ ., data=X)
+plot(res, xlab=QsRutils::ord_labels(res)[1], ylab=QsRutils::ord_labels(res)[2])
+
+# dbRDA 
+# note the result is the same as for RDA when using euclidean distances
+res <- capscale(Y ~ ., data=X, distance='euclidean')
+plot(res, xlab=QsRutils::ord_labels(res)[1], ylab=QsRutils::ord_labels(res)[2])
+
+# exploring statistically
+# summary of the results
+summary(res, display=NULL)
+
+## select only the variables that are explaining variation efficiently.
+
+# calculate variance inflation factors (VIF)
+# variables with scores >10 are redundant
+sort(vif.cca(res))
+
+# Fitting environmental vectors/factors onto an ordination 
+# calculate fit
+bio.fit <- envfit(Y ~ ., data=X)
+
+# Stepwise selection (ordistep)
+# set up full and null models for 'ordistep'
+# full model
+rda1 <- rda(Y ~ ., data=X)
+# intercept-only (null) model
+rda0 <- rda(Y ~ 1, data=X)
+
+# perform forward and backward selection of explanatory variables
+# output not shown
+step.env <- ordistep(rda0, scope=formula(rda1), direction='both')
+# look at the significant variables 
+step.env$anova
+# For the sake of argument, let’s include the variables
+# with low VIF scores along with those identified by ordistep.
+# code to get variable names from 'ordistep' and 'envfit' results
+vars.ordistep <- gsub('^. ', '', rownames(step.env$anova))
+vars.biofit <- names(which(bio.fit$vectors$pvals <= 0.01))
+vars.envfit <- names(which(vif.cca(res) <= 10))
+vars <- unique(c(vars.ordistep, vars.envfit,vars.biofit))
+vars 
+# select variables to keep from table 'Y'
+X1 <- X[, vars]
+str(X1)
+
+# RDA
+res <- rda(Y ~ ., data=X1)
+
+# summary of the results
+summary(res, display=NULL)
+# permutation test of statistical significance
+anova(res)
+
+# plotting
+# load library
+
+# set up dataframes for plotting the results
+sit <- cbind(MH_env.depth.south.na, scores(res, display='sites')) 
+sit$cluster <- as.factor(sit$cluster)
+# below the code to plot the RDA w/o surface samples
+rda_env <- subset(MH_env.depth.south.na, row.names(MH_env.depth.south.na) %in% row.names(X))
+sit <- cbind(rda_env, scores(res, display='sites')) 
+
+spp <- cbind(data.frame(TAX.filt.mh.south), scores(res, display='species'))
+vec <- data.frame(scores(res, display='bp'))
+
+# use these to adjust length of arrows and position of arrow labels
+adj.vec <- 2
+adj.txt <- 2.5
+
+# 'site' ordination
+p1 <- ggplot(sit, aes(x=RDA1, y=RDA2, color=Depth)) +
+  geom_point(size=3) + 
+  geom_segment(data=vec, inherit.aes=F, 
+               mapping=aes(x=0, y=0, xend=adj.vec*RDA1, yend=adj.vec*RDA2), 
+               arrow=arrow(length=unit(0.2, 'cm')),alpha=0.5) + 
+  geom_text(data=vec, inherit.aes=F, 
+            mapping=aes(x=adj.txt*RDA1, y=adj.txt*RDA2, 
+                        label=c(rownames(vec))),alpha=0.5) +
+  labs(colour = "Depth")+ #another way to set the labels, in this case, for the colour legend
+  theme_bw()
+p1$labels$x <- QsRutils::ord_labels(res)[1]
+p1$labels$y <- QsRutils::ord_labels(res)[2]
+
+p1 + ggtitle("RDA - Archaeal Community\nDepth Profile")
+p1 + ggtitle("RDA - Archaeal Community\nDepth Profile (w/o surface samples")
+```
+
+```{r variation part}
+# Variation partitioning
+
+# extract the sample data from the 'phyloseq' object
+# then remove the 'SampleID' column
+# for only categorical predictors - standardize
+dat <- MH_env.depth.south.na[, c("Depth","DO","Salinity","Temperature", "CN", "TSSmean")] 
+
+# use standardised categorical and continuous predictors in the constraint (X)
+X <- ade4::dudi.mix(dat, scannf=F, nf=2)$tab
+names(X)
+# define the partitions
+# MH variables from ordistep and envfit analyses
+X1 <- X[, c("Depth","DO","Salinity","Temperature", "CN", "TSSmean")] 
+# Depth variables
+X2 <- X[, grep('^Depth', names(X), value=T)]
+
+# partition variation and plot the result
+vp <- varpart(Y, X1, X2)
+plot(vp, Xnames=c('Env', 'Depth'), bg = c("hotpink","skyblue"))
+```
+
+## Differential Abundance
+```{r aldex2}
+# generate the datasets by making dataframes with surface samples and dataframes with the conditions
+# here, can use all dataset or the filtered dataset
+# testing if OTUs are different between two conditions (clusters)?
+# get the samples from each cluster
+samples.cluster1 <- d.filt.mh.south %>% dplyr::select(ends_with("3"))
+samples.cluster1.south <- d.filt.mh.south %>% dplyr::select(ends_with("3") & contains("S"))
+samples.cluster2 <- d.filt.mh.south %>% dplyr::select(ends_with("8")) 
+samples.cluster3 <- d.filt.mh.south %>% dplyr::select(ends_with("20"), ends_with("30")) 
+
+# make the conditions
+# PS: even without filtering the results are quite the same (the same taxa are deferentially abundant)
+d.aldex.1.2 <- d.filt.mh.south %>% dplyr::select(ends_with("3") | ends_with("8") )
+d.aldex.1.3 <- d.filt.mh.south %>% dplyr::select(ends_with("3") | ends_with("20") | ends_with("30") )
+d.aldex.2.3 <- d.filt.mh.south %>% dplyr::select(ends_with("8") | ends_with("20") | ends_with("30") )
+
+# make a vector containing the two names of the conditions
+# in the same order as in the column names
+## To know how many samples per depth
+s3 <-  length(grep("_3$", colnames(d.filt.mh.south))) # use $ to match the end of a line
+s8 <- length(grep("_8", colnames(d.filt.mh.south)))
+s20 <- length(grep("_20", colnames(d.filt.mh.south)))
+s30 <- length(grep("_30", colnames(d.filt.mh.south)))
+
+# conditions (clusters)
+conds.aldex.1.2 <- c(rep("1", s3), rep("2", s8))
+conds.aldex.1.3 <- c(rep("1",s3), rep("3", s20), rep("3", s30))
+conds.aldex.2.3 <- c(rep("2", s8), rep("3", s20), rep("3", s30))
+
+## CHECK this vector in your console by typing: 
+conds.aldex.2.3
+#    This should match the order and number of columns you have: 
+colnames(d.aldex.2.3)
+
+# Calculate the Kruskal-Wallis test and glm ANOVA statistics
+## x.w <- ALDEx2::aldex.kw(x)
+x.all.1.2 <- ALDEx2::aldex(d.aldex.1.2 , conds.aldex.1.2, mc.samples=128, test="t", effect=TRUE, include.sample.summary=FALSE, verbose=FALSE)
+x.all.1.3 <- ALDEx2::aldex(d.aldex.1.3 , conds.aldex.1.3, mc.samples=128, test="t", effect=TRUE, include.sample.summary=FALSE, verbose=FALSE)
+x.all.2.3 <- ALDEx2::aldex(d.aldex.2.3 , conds.aldex.2.3, mc.samples=128, test="t", effect=TRUE, include.sample.summary=FALSE, verbose=FALSE)
+
+# generate a datasetc with all OTUs with effect size > |2|
+x.all.1.2 <- x.all.1.2 %>% rownames_to_column(var = "OTU")
+x.all.1.3 <- x.all.1.3 %>% rownames_to_column(var = "OTU")
+x.all.2.3 <- x.all.2.3 %>% rownames_to_column(var = "OTU")
+names(all.eff.OTU)
+all.eff.OTU <- x.all.1.2 %>% full_join(x.all.1.3, by = "OTU") %>% 
+  full_join(.,x.all.2.3, by = "OTU")
+all.eff.OTU.filt <- all.eff.OTU %>% 
+  filter(effect.x >= 2 | effect.x <= -2 | effect.y >= 2 | effect.y <= -2 | effect >= 2 | effect <= -2) %>%
+  'rownames<-'(.[,1])
+
+x.all.1.2 <- x.all.1.2 %>% column_to_rownames(var = "OTU")
+x.all.1.3 <- x.all.1.3 %>% column_to_rownames(var = "OTU")
+x.all.2.3 <- x.all.2.3 %>% column_to_rownames(var = "OTU")
+
+# make a table with taxa names
+all.eff.OTU.taxa <- all.eff.OTU %>% dplyr::select(OTU) %>% left_join(TAX.table)
+
+all.eff.OTU.filt <- all.eff.OTU.filt %>% left_join(TAX.table)
+
+```
+
+
+
+```{r heatmap}
+# subset the significant OTUs
+d.otu.sig <- subset(d.clr.abund.filt.mh.south, row.names(d.clr.abund.filt.mh.south) %in% all.eff.OTU.filt$OTU) %>% 
+  as.data.frame() %>% rownames_to_column(var = 'OTU') %>% left_join(TAX.table) %>% select(-Kingdom, - Phylum, -Class, - Order, - Family) %>%
+  unite("OTU_genus", c(OTU,Genus), remove = FALSE) %>% column_to_rownames(var = 'OTU_genus') 
+
+p <- heatmaply::heatmaply(
+  d.otu.sig[,2:25], 
+  xlab = "Samples",
+  ylab = "Archaeal OTUs\n", 
+  main = "CLR-transformed abundances",
+  dendrogram = 'column',
+  label_names = c("OTU", "Sample", "clr-value")
+  #grid_color = "white",
+  #grid_width = 0.0000001
+  )
+p
+```
+
+```{r}
+sessionInfo()
+```
+
