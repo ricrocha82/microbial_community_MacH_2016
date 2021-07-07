@@ -59,8 +59,8 @@ if(sum(as.numeric(!pcks %in% installed.packages())) != 0){
 #library(ggpubr)
 # load my functions
 
-source('~/R/phd/2016/script/1st_chpt/my_functions.R')
-source('~/R/phd/2016/script/1st_chpt/theme_publication.R')
+source('script/my_functions.R')
+source('script/theme_publication.R')
 
 ```
 
@@ -246,7 +246,7 @@ pca.bac <- pca.bac +
   annotate("text", x= 30, y = 17.5, label = 'atop(bold("20 m and"), bold("2 m from the bottom"))', size = 4.5, parse = TRUE) +
   theme_Publication()
 
-ggsave(paste0(folder_path, "/output/plots/new_submission_compressed/EDA_pca_bac.tiff"), pca.bac, compression = "lzw")
+ggsave(paste0(folder_path, "/output/EDA_pca_bac.tiff"), pca.bac, compression = "lzw")
 
 
 ```
@@ -255,8 +255,8 @@ ggsave(paste0(folder_path, "/output/plots/new_submission_compressed/EDA_pca_bac.
 ```{r clean R env}
 # keep the environment tidy
 rm(list=setdiff(ls(), c('folder_path','pseq.bac' ,'pseq.filt', 'pseq.filt.clr', 'pseq.filt.rel')))
-source('~/R/phd/2016/script/1st_chpt/my_functions.R')
-source('~/R/phd/2016/script/1st_chpt/theme_publication.R')
+source('script/my_functions.R')
+source('script/theme_publication.R')
 ```
 
 ### Hierarchical Cluster
@@ -320,7 +320,7 @@ bar2 <- bar_plot_taxa_group(pseq.filt.rel, "Class", "Depth") +
 
 plot_bar <- bar1 / bar2 + plot_annotation(tag_levels = 'A')
 
-ggsave(paste0(folder_path,"/output/plots/new_submission_compressed/bar_plot_bac.tiff"),plot_bar ,
+ggsave(paste0(folder_path,"/output/bar_plot_bac.tiff"),plot_bar ,
        width = 20, height = 15, compression = "lzw")
 
 ```
@@ -426,8 +426,8 @@ pseq.bac <- phyloseq(otu_table(as.matrix(abund.df), taxa_are_rows = TRUE),
 ```{r clean R env}
 # keep the environment tidy
 rm(list=setdiff(ls(), c('folder_path','pseq.bac' ,'pseq.filt', 'pseq.filt.clr', 'pseq.filt.rel', 'clust1')))
-source('~/R/phd/2016/script/1st_chpt/my_functions.R')
-source('~/R/phd/2016/script/1st_chpt/theme_publication.R')
+source('script/my_functions.R')
+source('script/theme_publication.R')
 ```
 
 # Vertical Distribution - Depth profile
@@ -528,8 +528,8 @@ pseq.filt.mh.clr <- phyloseq(otu_table(as.matrix(d.clr.abund.filt.mh.south), tax
 ```{r clean R env}
 # keep the environment tidy
 rm(list=setdiff(ls(), c('folder_path','pseq.bac' ,'pseq.filt', 'pseq.filt.clr', 'pseq.filt.rel', 'clust1', 'pseq.mh.south', 'pseq.filt.south', 'pseq.filt.rel.south', 'pseq.filt.mh.clr')))
-source('~/R/phd/2016/script/1st_chpt/my_functions.R')
-source('~/R/phd/2016/script/1st_chpt/theme_publication.R')
+source('script/my_functions.R')
+source('script/theme_publication.R')
 ```
 
 ### Environmental variables and Alpha diversity indices 
@@ -547,7 +547,7 @@ meta_mh_summary <- data_long%>%
   group_by(Depth, env_par) %>%
   summarise(mean= mean(value), sd= sd(value), max = max(value),min = min(value))
 # last format on excel
-write.csv(meta_mh_summary, "C:/Users/rrocha/Documents/R/phd/2016/output/data/meta_mh_south_summary.csv")
+write.csv(meta_mh_summary, "output/meta_mh_south_summary.csv")
 
 # STATS  
 # making summary tables (ANOVA and Tukey)
@@ -557,7 +557,7 @@ stats.sum.depth <- data_long %>%
          tidy = map(model, broom::tidy)) %>% 
   select(env_par, tidy) %>% 
   unnest(tidy)
-# write.csv(stats.sum.depth, "C:/Users/rrocha/Documents/R/phd/2016/output/data/anova_env_summary_depth.csv")
+# write.csv(stats.sum.depth, "output/anova_env_summary_depth.csv")
 
 stats.sum.depth.Tukey <- data_long %>% 
   nest(data = c(Depth, value)) %>% 
@@ -572,7 +572,7 @@ stats.sum.depth.Tukey <- data_long %>%
                                 contrast ==  "2mBottom-8" ~ "2mBottom vs 8",
                                 contrast ==  "2mBottom-20" ~  "2mBottom vs 20"))
 
-write.csv(stats.sum.depth.Tukey, "C:/Users/rrocha/Documents/R/phd/2016/output/data/anova_env_summary_depth_tukey.csv")
+write.csv(stats.sum.depth.Tukey, "output/anova_env_summary_depth_tukey.csv")
 
 # correlation of env_parameters and depth
 library(corrr)
@@ -689,7 +689,7 @@ pca.bac <- pca.plot +
 # plot the hclust (EDA) and pca+kmean together
 plot <- clust1 / pca.bac + plot_annotation(tag_levels = "A")
 
-ggsave(paste0(folder_path, "/output/plots/new_submission_compressed/hclust_pca_south.tiff"), plot, 
+ggsave(paste0(folder_path, "/output/hclust_pca_south.tiff"), plot, 
        width = 13, height = 12, compression = "lzw")
 
 # add a cluster column to the meta data
@@ -714,8 +714,8 @@ pseq.filt.mh.clr@sam_data <- sample_data(MH_env)
 ```{r clean R env}
 # keep the environment tidy
 rm(list=setdiff(ls(), c('folder_path','pseq.bac' ,'pseq.filt', 'pseq.filt.clr', 'pseq.filt.rel',  'pseq.mh.south', 'pseq.filt.south', 'pseq.filt.rel.south', 'pseq.filt.mh.clr')))
-source('~/R/phd/2016/script/1st_chpt/my_functions.R')
-source('~/R/phd/2016/script/1st_chpt/theme_publication.R')
+source('script/my_functions.R')
+source('script/theme_publication.R')
 ```
 
 ### Community Composition - Depth profile
@@ -850,15 +850,15 @@ box.class <- pseq.filt.rel.south %>%
 
 box.plot <- box.phylum / box.class + plot_annotation(tag_levels = "A")
 
-ggsave(paste0(folder_path, "/output/plots/new_submission_compressed/boxplot_phylum_and_class.tiff"), box.plot, width = 10, height = 11.75, compression = "lzw")
+ggsave(paste0(folder_path, "/output/boxplot_phylum_and_class.tiff"), box.plot, width = 10, height = 11.75, compression = "lzw")
 ```
 
 
 ```{r clean R env}
 # keep the environment tidy
 rm(list=setdiff(ls(), c('folder_path','pseq.bac' ,'pseq.filt', 'pseq.filt.clr', 'pseq.filt.rel',  'pseq.mh.south', 'pseq.filt.south', 'pseq.filt.rel.south', 'pseq.filt.mh.clr')))
-source('~/R/phd/2016/script/1st_chpt/my_functions.R')
-source('~/R/phd/2016/script/1st_chpt/theme_publication.R')
+source('script/my_functions.R')
+source('script/theme_publication.R')
 ```
 
 ### Ordination - RDA
@@ -993,7 +993,7 @@ p1$labels$y <- QsRutils::ord_labels(res)[2]
 
 p.rda <- p1 + theme_Publication_1()
 
-ggsave(paste0(folder_path,"/output/plots/new_submission_compressed/RDA_bac.tiff"), p.rda, compression = "lzw")
+ggsave(paste0(folder_path,"/output/RDA_bac.tiff"), p.rda, compression = "lzw")
 
 ```
 
@@ -1017,7 +1017,7 @@ X2 <- X[, grep('^Depth', names(X), value=T)]
 
 # partition variation and plot the result
 vp <- varpart(Y, X1, X2)
-tiff(paste0(folder_path,"/output/plots/new_submission_compressed/venndiagram_rda.tiff"), compression = "lzw")
+tiff(paste0(folder_path,"/output/venndiagram_rda.tiff"), compression = "lzw")
 plot(vp, Xnames=c('Env', 'Depth'), bg = c("hotpink","skyblue"))
 dev.off()
 ```
@@ -1067,14 +1067,14 @@ mm <- ggplot(mat, aes(y = aa, x = tt)) +
                                              sep = ""))) +
   theme_Publication_1()
 
-ggsave(paste0(folder_path,"/output/plots/new_submission_compressed/mantel_bac_env.tiff"), mm, compression = "lzw")
+ggsave(paste0(folder_path,"/output/mantel_bac_env.tiff"), mm, compression = "lzw")
 ```
 
 ```{r clean R env}
 # keep the environment tidy
 rm(list=setdiff(ls(), c('folder_path','pseq.bac' ,'pseq.filt', 'pseq.filt.clr', 'pseq.filt.rel',  'pseq.mh.south', 'pseq.filt.south', 'pseq.filt.rel.south', 'pseq.filt.mh.clr')))
-source('~/R/phd/2016/script/1st_chpt/my_functions.R')
-source('~/R/phd/2016/script/1st_chpt/theme_publication.R')
+source('script/my_functions.R')
+source('script/theme_publication.R')
 ```
 
 ### Differential Abundance
@@ -1178,9 +1178,9 @@ sig.all.2.3 <- x.all.2.3 %>%
   arrange(Phylum, Class,dplyr::desc(effect)) %>%       # sort by effect size
   column_to_rownames('OTU')   
 
-write.csv(sig.all.1.2, "C:/Users/rrocha/Documents/R/phd/2016/output/data/aldex.1.2.csv")
-write.csv(sig.all.1.3, "C:/Users/rrocha/Documents/R/phd/2016/output/data/aldex.1.3.csv")
-write.csv(sig.all.2.3, "C:/Users/rrocha/Documents/R/phd/2016/output/data/aldex.2.3.csv")
+write.csv(sig.all.1.2, "output/aldex.1.2.csv")
+write.csv(sig.all.1.3, "output/aldex.1.3.csv")
+write.csv(sig.all.2.3, "output/aldex.2.3.csv")
 ```
 
 ```{r themes for aldex plots}
@@ -1253,7 +1253,7 @@ p2.phylum <- plot_strip(table.aldex.2.3, Phylum,"Effect Size")  +
 
 aldex.phylum <- p1.phylum + p2.phylum
 
-ggsave(paste0(folder_path,"/output/plots/new_submission_compressed/aldex.phylum.tiff"),aldex.phylum, compression = "lzw")
+ggsave(paste0(folder_path,"/output/aldex.phylum.tiff"),aldex.phylum, compression = "lzw")
 ```
 
 ```{r strip plot Class}
@@ -1355,7 +1355,7 @@ p2.class.p <- plot_strip(table.aldex.2.3, Class, "Effect Size")+
 plots.class <- (p1.class + p2.class) / (p1.class.p + p2.class.p) + 
   plot_annotation(tag_levels = list(c('A',"","B")))
 
-ggsave(paste0(folder_path,"/output/plots/new_submission_compressed/aldex.class.tiff"),
+ggsave(paste0(folder_path,"/output/aldex.class.tiff"),
        plots.class, compression = "lzw", 
        height = 9.5, width = 12)
 
@@ -1368,7 +1368,7 @@ plos.aldex.phylum.class <- egg::ggarrange(p1.phylum,
                                           ncol = 2, nrow=3, 
                                           labels = c('A',"","B", "", "",""))
 
-ggsave(paste0(folder_path,"/output/plots/new_submission_compressed/aldex.phylum.class.tiff"),
+ggsave(paste0(folder_path,"/output/aldex.phylum.class.tiff"),
        plos.aldex.phylum.class, 
        compression = "lzw", 
        height = 11.5, width = 10)
@@ -1556,7 +1556,7 @@ family.plots <- ggarrange(p1.alpha,
           p2.bact,
           ncol = 2,nrow=3)
 
-ggsave(paste0(folder_path,"/output/plots/new_submission_compressed/aldex.family.tiff"),
+ggsave(paste0(folder_path,"/output/aldex.family.tiff"),
        family.plots, 
        compression = "lzw", 
        height = 11.5, width = 9)
@@ -1612,14 +1612,14 @@ p1.genus+p2.genus
 
 aldex.genus <- egg::ggarrange(p1.genus,p2.genus,ncol = 2)
 
-ggsave(paste0(folder_path,"/output/plots/new_submission_compressed/aldex.genus.tiff"),aldex.genus, compression = "lzw", width = 8, height = 6.5)
+ggsave(paste0(folder_path,"/output/aldex.genus.tiff"),aldex.genus, compression = "lzw", width = 8, height = 6.5)
 ```
 
 ```{r clean R env}
 # keep the environment tidy
 rm(list=setdiff(ls(), c('folder_path','pseq.bac', 'pseq.filt.south', 'pseq.filt.mh.clr',"x.all.1.2", "x.all.1.3", 'x.all.2.3')))
-source('~/R/phd/2016/script/1st_chpt/my_functions.R')
-source('~/R/phd/2016/script/1st_chpt/theme_publication.R')
+source('script/my_functions.R')
+source('script/theme_publication.R')
 ```
 
 ### Random Florest - Classification
@@ -1713,7 +1713,7 @@ stat_rf_plot <- cluster.stats.df %>%
   theme(legend.title = element_blank()) +
   theme_Publication_1()
 
-ggsave(paste0(folder_path,"/output/plots/new_submission_compressed/rf_stat_plot.tiff"),stat_rf_plot, compression = "lzw")
+ggsave(paste0(folder_path,"/output/rf_stat_plot.tiff"),stat_rf_plot, compression = "lzw")
 ```
 
 
@@ -1731,7 +1731,7 @@ impvars.class.cluster <- local.models %>%
   rownames_to_column("Class") %>%
   slice_max(Overall, n = 10)
 
-vImp.df <- read_csv("~/R/phd/2016/output/data/impvars_class_final.csv") %>%
+vImp.df <- read_csv("output/impvars_class_final.csv") %>%
   slice_max(Overall, n = 10)
 
 # Plot variable importance of these top 10
@@ -1803,9 +1803,9 @@ table.aldex.2.3 <- x.all.2.3  %>%
   column_to_rownames('OTU') 
 
 
-write.csv(table.aldex.1.2,"C:/Users/rrocha/Documents/R/phd/2016/output/data/aldex_rf/aldex_rf_1.2.csv")
-write.csv(table.aldex.2.3,"C:/Users/rrocha/Documents/R/phd/2016/output/data/aldex_rf/aldex_rf_2.3.csv")
-write.csv(table.aldex.1.3,"C:/Users/rrocha/Documents/R/phd/2016/output/data/aldex_rf/aldex_rf_1.3.csv")
+write.csv(table.aldex.1.2,"output/aldex_rf/aldex_rf_1.2.csv")
+write.csv(table.aldex.2.3,"output/aldex_rf/aldex_rf_2.3.csv")
+write.csv(table.aldex.1.3,"output/aldex_rf/aldex_rf_1.3.csv")
 ```
 
 
@@ -1837,15 +1837,15 @@ p3.rf.class <- plot_strip(table.aldex.1.3, Class, "Effect size") +
         axis.title.y = element_blank())
 
 rf.plots <- ggarrange(plot.varImp , p3.rf.class , p1.rf.class , p2.rf.class)
-ggsave(paste0(folder_path,"/output/plots/new_submission_compressed/rf_plots.tiff"), rf.plots, compression = 'lzw', width = 13, height = 7)
+ggsave(paste0(folder_path,"/output/rf_plots.tiff"), rf.plots, compression = 'lzw', width = 13, height = 7)
 
 ```
 
 ```{r clean R env}
 # keep the environment tidy
 rm(list=setdiff(ls(), c('folder_path')))
-source('~/R/phd/2016/script/1st_chpt/my_functions.R')
-source('~/R/phd/2016/script/1st_chpt/theme_publication.R')
+source('script/my_functions.R')
+source('script/theme_publication.R')
 ```
 
 ## Archaeal Community
@@ -1962,7 +1962,7 @@ p2 <- bar.plots.arc[["Family"]] +
 plots_to_save <- p1/ p2 / bar.plots.arc[["Genus"]] + 
   plot_annotation(tag_levels = c('A', 'B', 'C'))
 
-ggsave(paste0(folder_path,"/output/plots/new_submission_compressed/bar_plot_arc.tiff"),
+ggsave(paste0(folder_path,"/output/bar_plot_arc.tiff"),
        plots_to_save,
        width = 12.5, height = 10, 
        compression = "lzw")
@@ -2018,8 +2018,8 @@ pseq.arc <- phyloseq(otu_table(as.matrix(abund.df), taxa_are_rows = TRUE),
 ```{r clean R env}
 # keep the environment tidy
 rm(list=setdiff(ls(), c('folder_path','pseq.arc')))
-source('~/R/phd/2016/script/1st_chpt/my_functions.R')
-source('~/R/phd/2016/script/1st_chpt/theme_publication.R')
+source('script/my_functions.R')
+source('script/theme_publication.R')
 ```
 
 
@@ -2059,7 +2059,7 @@ data_long <- combDF.south %>% gather(key="env_par", value="value", -Depth)
 meta_mh_summary <- data_long%>% group_by(Depth, env_par)%>%
   summarise(mean= mean(value), sd= sd(value), max = max(value),min = min(value))
 # last format on excel
-write.csv(meta_mh_summary, "C:/Users/rrocha/Documents/R/phd/2016/output/data/meta_mh_south_summary_arc.csv")
+write.csv(meta_mh_summary, "output/meta_mh_south_summary_arc.csv")
 
 # sorting axis for plot
 data_long$env_par <- factor(data_long$env_par, levels=c("Chao1_arc","Shannon_arc"))
@@ -2103,7 +2103,7 @@ stats.sum.depth <- data_long %>%
          tidy = map(model, broom::tidy)) %>% 
   select(env_par, tidy) %>% 
   unnest(tidy)
-write.csv(stats.sum.depth, "C:/Users/rrocha/Documents/R/phd/2016/output/data/anova_env_summary_depth_arc.csv")
+write.csv(stats.sum.depth, "output/anova_env_summary_depth_arc.csv")
 
 stats.sum.depth.Tukey <- data_long %>% 
   nest(data = c(Depth, value)) %>% 
@@ -2118,7 +2118,7 @@ stats.sum.depth.Tukey <- data_long %>%
                                 comparison ==  "2mBottom-8" ~ "2mBottom vs 8",
                                 comparison ==  "2mBottom-20" ~  "2mBottom vs 20"))
 
-write.csv(stats.sum.depth.Tukey, "C:/Users/rrocha/Documents/R/phd/2016/output/data/anova_env_summary_depth_tukey_arc.csv")
+write.csv(stats.sum.depth.Tukey, "output/anova_env_summary_depth_tukey_arc.csv")
 ```
 
 ```{r correlation}
@@ -2131,7 +2131,7 @@ signif(cor.tab.spearman,2)
 # now, using Hmisc package - return the p-values
 source("http://www.sthda.com/upload/rquery_cormat.r")
 p.corr.meta <- rquery.cormat(MH_env.mh.south.na,type="flatten", graph=TRUE, graphType="correlogram")$r
-write.csv(p.corr.meta, "C:/Users/rrocha/Documents/R/phd/2016/output/data/corr_env_summary_south_depth.csv")
+write.csv(p.corr.meta, "output/corr_env_summary_south_depth.csv")
 
 ```
 
@@ -2186,15 +2186,15 @@ bio.plot <- depth_profile_plot %>%
 
 profile_plot <- env.plot + bio.plot
 
-ggsave(paste0(folder_path,"/output/plots/new_submission_compressed/depth_profile_plot.tiff"), profile_plot,
+ggsave(paste0(folder_path,"/output/depth_profile_plot.tiff"), profile_plot,
        compression = "lzw")
 ```
 
 ```{r clean R env}
 # keep the environment tidy
 rm(list=setdiff(ls(), c('folder_path','pseq.arc', 'pseq.arc.south')))
-source('~/R/phd/2016/script/1st_chpt/my_functions.R')
-source('~/R/phd/2016/script/1st_chpt/theme_publication.R')
+source('script/my_functions.R')
+source('script/theme_publication.R')
 ```
 
 
@@ -2434,7 +2434,7 @@ p1$labels$y <- QsRutils::ord_labels(res)[2]
 
 p1 <- p1 + ggtitle("RDA - Archaeal Community (Southern Region)")
 
-ggsave(paste0(folder_path,"/output/plots/new_submission_compressed/RDA_arc.tiff"), p1,
+ggsave(paste0(folder_path,"/output/RDA_arc.tiff"), p1,
        compression = "lzw")
 ```
 
@@ -2464,8 +2464,8 @@ plot(vp, Xnames=c('Env', 'Depth'), bg = c("hotpink","skyblue"))
 ```{r clean R env}
 # keep the environment tidy
 rm(list=setdiff(ls(), c('folder_path','pseq.arc', 'pseq.arc.south', 'd.filt.mh.south', 'pseq.arc.south.clr')))
-source('~/R/phd/2016/script/1st_chpt/my_functions.R')
-source('~/R/phd/2016/script/1st_chpt/theme_publication.R')
+source('script/my_functions.R')
+source('script/theme_publication.R')
 ```
 
 
@@ -2567,7 +2567,7 @@ ht <- d.otu.sig %>%
   add_tile(Family,palette = c("#66C2A5", "#FC8D62")) %>%
   add_tile(Depth, palette = c("firebrick1", "forestgreen", "darkcyan", "darkblue"))
 
-tiff(filename = paste0(folder_path,"/output/plots/new_submission_compressed/heatmap_arc.tiff"), compression = "lzw", width = 15.8, height = 7.8, units = "in", res = 300)
+tiff(filename = paste0(folder_path,"/output/heatmap_arc.tiff"), compression = "lzw", width = 15.8, height = 7.8, units = "in", res = 300)
 ht
 dev.off()
 

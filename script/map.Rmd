@@ -36,8 +36,8 @@ Need to start a new session to run this script due to gstat conflicts with other
 
 ```{r packages}
 # set the working directory
-folder_path <- "C:/Users/rrocha/Documents/R/phd/2016/"
-setwd("C:/Users/rrocha/Documents/R/phd/2016/data/")
+folder_path <- getwd()
+setwd(paste0(folder_path,"/data"))
 
 # main packs to start with
 #install.packages("gstat",dependencies=T)
@@ -53,7 +53,7 @@ library(ggsn) # scale bar and north symbol
 library(patchwork)
 
 
-source('~/R/phd/2016/script/1st_chpt/theme_publication.R')
+source('script/theme_publication.R')
 #theme_set(theme_Publication_3())
 ```
 
@@ -61,7 +61,7 @@ source('~/R/phd/2016/script/1st_chpt/theme_publication.R')
 ```{r data}
 # Data preparation 
 ## meta data
-meta <- read.csv("C:/Users/rrocha/Documents/R/phd/2016/data/MH16_env.csv", row.names = 1)
+meta <- read.csv("MH16_env.csv", row.names = 1)
 # filter only surface data and remove any rows with missing data
 meta_surf <- meta %>% filter(Depth == 3) %>% drop_na() %>%
   mutate(sample_id = str_remove(sample_id, "_3"))
@@ -84,7 +84,7 @@ sources:
 
 ```{r bathymetry}
 #Here, I load a map with the sf package.
-bath_file <- "C:/Users/rrocha/Documents/R/geo_data_mh/MH_Bathymetry.zip"
+bath_file <- "MH_Bathymetry.zip"
 # load bathymetry
 shpdata_bath_mh <- st_read(dsn = unzip(bath_file, "SeamapTAS_contours_5mLine.shp"), layer = "SeamapTAS_contours_5mLine")
 # load MH boundaries
@@ -154,8 +154,8 @@ map_MH_bath <- MH_map + geom_sf(data = bath, alpha = 0.5, aes(color = CONTOUR)) 
 map1 <- MH_map + 
   inset_element(tasmania_map , 0.6, 0.6, 1, 1) 
 
-ggsave(paste0(folder_path,"/output/plots/map_MH_1.tiff"), map1, compression = "lzw")
-ggsave(paste0(folder_path,"/output/plots/map_MH_bath.tiff"), map_MH_bath, compression = "lzw") #-> if it crashes the session, problem with ragg package. Please uninstall 
+ggsave(paste0(folder_path,"/output/map_MH_1.tiff"), map1, compression = "lzw")
+ggsave(paste0(folder_path,"/output/map_MH_bath.tiff"), map_MH_bath, compression = "lzw") #-> if it crashes the session, problem with ragg package. Please uninstall 
 
 # MH map with samples
 MH_map +  
@@ -175,8 +175,8 @@ map3 <- map_labels +  geom_sf(data = bath, alpha = 0.5, aes(color = CONTOUR)) +
   labs(color = "Depth (m)")  + 
   inset_element(tasmania_map , 0.6, 0.6, 1, 1) 
 
-ggsave(paste0(folder_path,"/output/plots/map_MH_labels.tiff"), width = 15, height = 10 , map2, compression = 'lzw')
-ggsave(paste0(folder_path,"/output/plots/map_MH_labels_bath.tiff"), width = 15, height = 10 , map3, compression = 'lzw')
+ggsave(paste0(folder_path,"/output/map_MH_labels.tiff"), width = 15, height = 10 , map2, compression = 'lzw')
+ggsave(paste0(folder_path,"/output/map_MH_labels_bath.tiff"), width = 15, height = 10 , map3, compression = 'lzw')
 ```
 
 
@@ -229,7 +229,7 @@ plotnames = map(names(plot.list.int), ~paste0("interpolation_",., ".tiff"))
 #walk2(plotnames, plot.list.int, ~ggsave(filename = .x, plot = .y))
 
 plots <- wrap_plots(plot.list.int)
-ggsave(paste0(folder_path,"/output/plots/new_submission_compressed/interpolation.tiff"), plots, 
+ggsave(paste0(folder_path,"/output/new_submission_compressed/interpolation.tiff"), plots, 
        width = 16, height = 10 , 
        compression = "lzw",
        device = "tiff")
@@ -259,6 +259,6 @@ depth_profile_plot <- meta %>%
         labs(x = "Depth (m)",y = "log(Environmental varibles)") +
         theme_clean()
 
-ggsave(paste0(folder_path,"/output/plots/new_submission_compressed/depth_profile_plot.tiff"), depth_profile_plot,
+ggsave(paste0(folder_path,"/output/depth_profile_plot.tiff"), depth_profile_plot,
        compression = "lzw")
 ```
