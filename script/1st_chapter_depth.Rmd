@@ -532,7 +532,7 @@ source('script/my_functions.R')
 source('script/theme_publication.R')
 ```
 
-### Environmental variables and Alpha diversity indices 
+### Environmental variables
 
 ```{r env factors}
 MH_env.depth.south <- pseq.filt.mh.clr %>% get_tibble('sam_data') %>%
@@ -585,6 +585,23 @@ env.correlation <- combDF.south %>%
   shave()
 
 env.correlation
+
+MH_env.depth.south %>% 
+  dplyr::select("DO","Salinity","Temperature", "Carbon", "Nitrogen", "CN", "TSSmean", "AOB_copies", "AOA_copies", "nosZ_copies") %>%
+#  mutate(Depth = fct_relevel(Depth, c("3", "8", "20","2mBottom"))) %>%
+  GGally::ggpairs(aes(alpha = 0.5), 
+                #  columns = 2:11,
+                  lower = list(continuous = "smooth"))
+
+# padj 'fdr'
+MH_env.depth.south %>% 
+  dplyr::select("DO","Salinity","Temperature", "Carbon", "Nitrogen", "CN", "TSSmean", "AOB_copies", "AOA_copies", "nosZ_copies") %>% 
+  drop_na() %>% 
+  microbiome::associate( method = "pearson", 
+                         mode = "table", 
+                         p.adj.threshold = 0.001, 
+                         order = T) %>% 
+  filter(Correlation != 1)
 
 ```
 
@@ -2119,20 +2136,6 @@ stats.sum.depth.Tukey <- data_long %>%
                                 comparison ==  "2mBottom-20" ~  "2mBottom vs 20"))
 
 write.csv(stats.sum.depth.Tukey, "output/anova_env_summary_depth_tukey_arc.csv")
-```
-
-```{r correlation}
-# correlation of env_parameters and depth
-MH_env.mh.south.na <- combDF.south %>% drop_na() %>% 
-  rownames_to_column(var = "id") %>% select(-Depth) %>% column_to_rownames(var = "id")
-cor.tab.spearman <- MH_env.depth.south.na %>% data.matrix() %>% cor(method = "spearman")
-cor.tab.pearson <- MH_env.depth.south.na %>% data.matrix() %>% cor(method = "pearson")
-signif(cor.tab.spearman,2)
-# now, using Hmisc package - return the p-values
-source("http://www.sthda.com/upload/rquery_cormat.r")
-p.corr.meta <- rquery.cormat(MH_env.mh.south.na,type="flatten", graph=TRUE, graphType="correlogram")$r
-write.csv(p.corr.meta, "output/corr_env_summary_south_depth.csv")
-
 ```
 
 
