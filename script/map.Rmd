@@ -1,0 +1,264 @@
+---
+title: "map_depth_profile"
+author: "Ricardo Silva"
+date: "6/15/2021"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup}
+knitr::opts_chunk$set(
+	fig.height = 5,
+	fig.width = 8,
+	dpi = 180,
+	message = FALSE,
+	warning = FALSE,
+	cache = TRUE,
+	echo = TRUE
+)
+```
+
+```{r CLEAR EVERYTHING, eval=FALSE, include=FALSE}
+# unload all non-base packages
+lapply(names(sessionInfo()$otherPkgs), function(pkgs)
+  detach(
+    paste0('package:', pkgs),
+    character.only = T,
+    unload = T,
+    force = T
+))
+
+rm(list=ls())
+```
+
+Need to start a new session to run this script due to gstat conflicts with other packages
+
+```{r packages}
+# set the working directory
+folder_path <- "C:/Users/rrocha/Documents/R/phd/2016/"
+setwd("C:/Users/rrocha/Documents/R/phd/2016/data/")
+
+# main packs to start with
+#install.packages("gstat",dependencies=T)
+library(gstat) # inverse distance weighted, Kriging
+library(tidyverse)# data manipulation
+library(directlabels)
+library(sf)       # processing spatial vector data
+#library(raster) # extent funtion
+library(stars) # raster
+# Finally, some packages to make pretty plots
+library(viridis)
+library(ggsn) # scale bar and north symbol
+library(patchwork)
+
+
+source('~/R/phd/2016/script/1st_chpt/theme_publication.R')
+#theme_set(theme_Publication_3())
+```
+
+
+```{r data}
+# Data preparation 
+## meta data
+meta <- read.csv("C:/Users/rrocha/Documents/R/phd/2016/data/MH16_env.csv", row.names = 1)
+# filter only surface data and remove any rows with missing data
+meta_surf <- meta %>% filter(Depth == 3) %>% drop_na() %>%
+  mutate(sample_id = str_remove(sample_id, "_3"))
+
+meta_surf %>% 
+  ggplot(aes(x = long, y = lat, color = Salinity)) +
+  geom_point(size = 3, alpha = 0.7) +
+  scale_color_gradientn(colors = c("blue", "yellow", "red")) +
+  ggrepel::geom_text_repel(aes(label=sample_id)) +
+  theme_minimal()
+
+
+```
+
+sources:
+<https://keen-swartz-3146c4.netlify.app>
+<https://swilke-geoscience.net/post/spatial_interpolation/>
+<https://rspatial.org/raster/analysis/4-interpolation.html>
+<https://r-spatial.github.io/sf/>
+
+```{r bathymetry}
+#Here, I load a map with the sf package.
+bath_file <- "C:/Users/rrocha/Documents/R/geo_data_mh/MH_Bathymetry.zip"
+# load bathymetry
+shpdata_bath_mh <- st_read(dsn = unzip(bath_file, "SeamapTAS_contours_5mLine.shp"), layer = "SeamapTAS_contours_5mLine")
+# load MH boundaries
+shpdata_tas <- st_read(dsn = "tasstatepolygon", layer = "TAS_STATE_POLYGON_shp")
+
+```
+
+
+```{r shapefiles}
+# convert into an sf object
+crs = st_crs("EPSG:4326") #EPSG:WGS84
+crs$proj4string
+meta.sf = st_as_sf(meta_surf, coords = c("long", "lat"), crs = "+proj=longlat +ellps=GRS80") %>%
+  st_transform(crs)
+
+# transform the CRS using spTransform and specify the correct CRS (in this case is EPSG:WGS84 (+proj=longlat +datum=WGS84))
+tas <- st_transform(shpdata_tas, crs)
+bath <- st_transform(shpdata_bath_mh, crs)
+# make a SpatialPolygons object which defines a bounding box inside which to crop the world map polygons.
+# make the bounding box called clipper_MH
+#clipper_MH <- st_bbox(c(xmin= 145, ymin= -42.55, xmax= 145.7, ymax= -42.1),  crs = st_crs(4326))
+clipper_MH <- st_bbox(c(xmin= 145.2, ymin= -42.5, xmax= 145.55, ymax= -42.15),  crs = st_crs(4326))
+#clipper_MH <- as(extent(145, 145.7, -42.55, -42.1), "SpatialPolygons") # (min_longitude, max_longitude, min_latitude, max_latitude)
+#clipper_MH <- st_as_sf(clipper_MH)
+
+clipper_MH <- st_as_sfc(clipper_MH) # Convert foreign object to an sf object
+
+#  crop the object to the extent of a bounding box, using intersect():
+shpdata_MH_clip <- st_crop(tas,  clipper_MH)
+```
+
+
+```{r plot maps}
+# annotated map of Tasmania
+tasmania_map <- ggplot() + geom_sf(data = tas) +
+  coord_sf(xlim = c(143.8, 148.3), ylim = c(-43.5,-39.7))  +
+  # add name
+  annotate('text', x=146.7, y=-42, label = 'Tasmania') + 
+  # ad a rectangle in the Tas map 
+  annotate("rect", xmin = 145 , xmax = 145.7, ymin = -42.55, ymax = -42.1, fill = NA, colour = 'red') +
+  # change legens and axis
+  theme(panel.background = element_rect(fill = "white"),
+         # remove axis
+        axis.text = element_blank(),
+        axis.line = element_blank(),
+        axis.ticks = element_blank(),
+        #panel.border = element_blank(),
+        #panel.grid = element_blank(),
+        axis.title = element_blank(),
+        plot.margin = margin(0,0,0,0, 'cm'))
+
+# MH map
+MH_map <- ggplot() + 
+    geom_sf(data = shpdata_MH_clip)  + 
+    labs(x = "Long", y = "Lat") +
+    theme_minimal() +
+  # add north arrow and scale bar to the plot
+    north(shpdata_MH_clip, location =  "topleft") +
+    scalebar(shpdata_MH_clip, dist = 5, dist_unit = "km", st.size = 3,
+             transform = TRUE, model = "WGS84", border.size = 0.5, height = 0.01) +
+  theme(axis.text.x = element_text(angle = 45))
+
+map_MH_bath <- MH_map + geom_sf(data = bath, alpha = 0.5, aes(color = CONTOUR)) +
+  scale_color_viridis() +
+  labs(color = "Depth (m)")
+
+map1 <- MH_map + 
+  inset_element(tasmania_map , 0.6, 0.6, 1, 1) 
+
+ggsave(paste0(folder_path,"/output/plots/map_MH_1.tiff"), map1, compression = "lzw")
+ggsave(paste0(folder_path,"/output/plots/map_MH_bath.tiff"), map_MH_bath, compression = "lzw") #-> if it crashes the session, problem with ragg package. Please uninstall 
+
+# MH map with samples
+MH_map +  
+  geom_sf(data = meta.sf, mapping = aes(col = Salinity)) +
+  labs(x = "Long", y = "Lat")
+
+# map with sample labels
+map_labels <- MH_map + 
+  geom_sf(data = meta.sf, mapping = aes(fill = sample_id), show.legend = F, alpha = 0.3, size = 1)  +
+  ggrepel::geom_text_repel(data = meta_surf, aes(long, lat, label=sample_id), size = 4, box.padding = unit(0.01, "lines") ,segment.color = NA) 
+#  geom_sf_text(data = meta.sf, aes(label = sample_id), check_overlap = T) +
+ # directlabels::geom_dl(data = meta_surf, aes(long, lat, label=sample_id), method = list("top.bumpup", cex = .7, fontface = "bold", family = "Helvetica")) 
+map2 <- map_labels + inset_element(tasmania_map , 0.6, 0.6, 1, 1) 
+
+map3 <- map_labels +  geom_sf(data = bath, alpha = 0.5, aes(color = CONTOUR)) +
+  scale_color_viridis() +
+  labs(color = "Depth (m)")  + 
+  inset_element(tasmania_map , 0.6, 0.6, 1, 1) 
+
+ggsave(paste0(folder_path,"/output/plots/map_MH_labels.tiff"), width = 15, height = 10 , map2, compression = 'lzw')
+ggsave(paste0(folder_path,"/output/plots/map_MH_labels_bath.tiff"), width = 15, height = 10 , map3, compression = 'lzw')
+```
+
+
+```{r interpolation}
+# Create a grid template and rasterize:
+to_crop <- st_bbox(c(xmin= 145.2, 
+                     ymin= -42.44, 
+                     xmax= 145.55, 
+                     ymax= -42.15),  
+                   crs = st_crs(4326)) %>% st_as_sfc() 
+  
+grd <- clipper_MH  %>% 
+  st_as_stars() %>%
+  st_crop(to_crop)
+
+# reduce the plot area
+shpdata_MH_clip_plot <- st_crop(tas, to_crop)
+
+# interpolation
+# fit models
+# Inverse Distance Weighting
+# map all env parameters with purrr
+env_par <- c("DO","Salinity","Temperature", "Carbon", "Nitrogen", "CN", "TSSmean", "AOB_copies", "AOA_copies", "nosZ_copies", "Shannon_bac", "Chao1_bac") 
+idw_list <- env_par %>% 
+  set_names() %>%
+  map(., ~gstat::idw(as.formula(paste(., "~ 1")), meta.sf, grd))
+
+# plot each interpolation
+plot.list.int <- idw_list %>% 
+  map2(., names(idw_list), ~
+         ggplot() +
+         geom_stars(data = .x, aes(fill = var1.pred, x = x, y = y)) + 
+         geom_sf(data = shpdata_MH_clip_plot) + 
+         geom_sf(data = meta.sf) +
+         scale_fill_viridis() +
+         labs(fill = paste0(.y)) +
+         theme(axis.text = element_blank(),
+               axis.title = element_blank(),
+               axis.ticks.x=element_blank()) +
+         theme_void() # get rid of everything
+       )
+
+# name each plot to be saved
+plotnames = map(names(plot.list.int), ~paste0("interpolation_",., ".tiff"))
+```
+
+
+```{r plot interpolation}
+# ggsave with purrr
+#walk2(plotnames, plot.list.int, ~ggsave(filename = .x, plot = .y))
+
+plots <- wrap_plots(plot.list.int)
+ggsave(paste0(folder_path,"/output/plots/new_submission_compressed/interpolation.tiff"), plots, 
+       width = 16, height = 10 , 
+       compression = "lzw",
+       device = "tiff")
+
+```
+
+
+```{r depth profile}
+# nutrients
+depth_profile_plot <- meta %>% 
+        dplyr::select(Depth, DO, Salinity, Temperature, Carbon, Nitrogen, CN, TSSmean, AOB_copies, AOA_copies, nosZ_copies, Shannon_bac, Chao1_bac) %>% 
+        mutate(Depth = case_when(Depth == "2mBottom" ~ 30,
+               TRUE ~ as.numeric(Depth))) %>%
+        pivot_longer(!Depth, 
+                     names_to = 'variable',values_to = 'value' ) %>%
+        mutate(variable = fct_relevel(variable , c("DO","Salinity","Temperature", "Carbon", "Nitrogen", "CN", "TSSmean", "AOB_copies", "AOA_copies", "nosZ_copies"))) %>%
+    #   drop_na() %>%
+        ggplot(aes(Depth, log(value))) +
+        geom_point() +
+        #geom_line(alpha = 0.3) +
+        geom_smooth(se=FALSE, size=0.4, alpha = 1)  +
+      # scale_x_continuous(breaks=c(3, 8, 20, 30)) +
+        scale_x_reverse() +
+        coord_flip() + # geom_line is designed for horizontal plots
+       # facet_grid( variable ~ Distance, scales = "free_x") 
+        facet_wrap(~variable, scales = "free_x")  + 
+        labs(x = "Depth (m)",y = "log(Environmental varibles)") +
+        theme_clean()
+
+ggsave(paste0(folder_path,"/output/plots/new_submission_compressed/depth_profile_plot.tiff"), depth_profile_plot,
+       compression = "lzw")
+```
